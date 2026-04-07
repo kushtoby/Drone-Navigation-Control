@@ -1,701 +1,254 @@
-# Tello ROS 2 Project — Current Progress and Rebuild Guide
+# Tello ROS 2 Project — Detailed Walkthrough, Challenges, and Reproduction Guide
 
-## Overview
+## Purpose of This Document
 
-This document describes **exactly what has been built so far**, **why it was built this way**, and **how to recreate it from scratch**.
+This README is a **professional reconstruction guide** for the current state of the Tello ROS 2 project.
 
-At this stage, the project still has **not** implemented gesture recognition, flight control, or landing logic. What has been built is the ROS 2 and hardware foundation needed before perception and control can be added safely and cleanly.
+It is written so that someone else can:
 
-The current system now includes:
+- understand what has already been built
+- understand why it was built in this order
+- reproduce the current working setup from scratch
+- understand the main problems that came up during development
+- know exactly how those problems were diagnosed and resolved
 
-- a ROS 2 Python package
-- a working Python virtual environment
-- a `tello_adapter` node for telemetry
-- a `tello_camera` node for frame-health checks
-- a `tello_image_publisher` node for ROS image publishing
-- an `image_listener` node for subscribing to ROS images
-- successful connection to the Tello drone
-- working ROS 2 topics for battery, link, frame health, and image transport
+This version is intentionally different from a short project summary.  
+It is a **walkthrough**.
 
-This stage proves that:
+Since the full package files will be uploaded separately, this document does **not** need to include all script contents inline. Instead, it explains:
 
-1. ROS 2 can run the package correctly
-2. the correct Python environment is being used
-3. `djitellopy` works with the Tello on this machine
-4. the drone can be reached over Wi-Fi
-5. ROS 2 topics can publish live telemetry
-6. the Tello video stream can be received
-7. OpenCV frames can be converted to ROS images with `cv_bridge`
-8. ROS image subscribers can receive and decode those images successfully
+- what each node does
+- how the system evolved
+- what configuration changes were required
+- what commands to run
+- what failures happened
+- how to fix them
+
+At the current stage, the project does **not** yet implement:
+- hand detection
+- gesture recognition
+- supervisor logic
+- motion commands
+- landing logic
+
+What *has* been completed is the full ROS 2 and Tello communication baseline needed before perception and control can be added.
 
 ---
 
-## Current Architecture
+# 1. Current Project Scope
 
-The project has moved from a minimal telemetry-only layout to a basic ROS vision pipeline.
+The current system has successfully validated four major stages:
 
-### Telemetry side
+1. **Telemetry stage**
+   - Tello connection
+   - battery reading
+   - link-health publishing
+
+2. **Frame-health stage**
+   - Tello video stream startup
+   - frame availability checks
+   - frame size reporting
+
+3. **ROS image publishing stage**
+   - OpenCV frame acquisition from Tello
+   - conversion to ROS image messages using `cv_bridge`
+   - publishing to `/tello/image_raw`
+
+4. **ROS image subscriber stage**
+   - subscribing to `/tello/image_raw`
+   - converting ROS image messages back to OpenCV format
+   - validating the full image pipeline
+
+This means the project has already proven:
+
+- ROS 2 package execution works
+- Python environment management works
+- DJITelloPy works with the Tello
+- the Tello can be reached over Wi-Fi
+- basic telemetry can be published as ROS topics
+- the Tello video stream can be received
+- ROS image transport can be used successfully
+
+---
+
+# 2. Current Architecture
+
+At this point the system is still being tested in isolated layers rather than as one final integrated runtime.
+
+## Telemetry path
 
 ```text
-Tello drone  --->  djitellopy  --->  tello_adapter  --->  ROS 2 topics
+Tello drone
+   ↓
+DJITelloPy
+   ↓
+tello_adapter
+   ↓
+/tello/battery
+/tello/link_ok
 ```
 
-### Vision side
+## Frame-health path
 
 ```text
-Tello drone  --->  djitellopy  --->  tello_image_publisher  --->  /tello/image_raw  --->  image_listener
+Tello drone
+   ↓
+DJITelloPy
+   ↓
+tello_camera
+   ↓
+/tello/frame_alive
+/tello/frame_width
+/tello/frame_height
 ```
 
-### Important note
+## ROS image pipeline
 
-At the current stage, these nodes are still tested **individually**, not all at once.  
+```text
+Tello drone
+   ↓
+DJITelloPy
+   ↓
+tello_image_publisher
+   ↓
+/tello/image_raw
+   ↓
+image_listener
+   ↓
+/tello/image_received
+```
+
+## Important architectural note
+
+At the current stage, these nodes are **validated independently**.
+
 That is intentional.
 
-Each of these nodes currently creates its own `Tello()` connection when run, so they should **not** all be run simultaneously in the final system. Right now they are being used as isolated validation stages.
+Each node currently creates its own `Tello()` object and manages its own connection when run. That is acceptable for testing each stage one at a time, but it is **not** the final architecture for the full project.
+
+The final integrated system will eventually need a cleaner hardware interface design so multiple high-level nodes are not all trying to own the drone connection separately.
 
 ---
 
-## Current Working ROS 2 Topics
+# 3. Current ROS 2 Topics
 
-### Telemetry topics
-- `/tello/battery` (`std_msgs/Int32`)
-- `/tello/link_ok` (`std_msgs/Bool`)
+## Telemetry topics
+- `/tello/battery` → `std_msgs/Int32`
+- `/tello/link_ok` → `std_msgs/Bool`
 
-### Camera/frame-health topics
-- `/tello/frame_alive` (`std_msgs/Bool`)
-- `/tello/frame_width` (`std_msgs/Int32`)
-- `/tello/frame_height` (`std_msgs/Int32`)
+## Camera frame-health topics
+- `/tello/frame_alive` → `std_msgs/Bool`
+- `/tello/frame_width` → `std_msgs/Int32`
+- `/tello/frame_height` → `std_msgs/Int32`
 
-### ROS image transport topics
-- `/tello/image_raw` (`sensor_msgs/Image`)
-- `/tello/image_received` (`std_msgs/Bool`)
-
----
-
-## Current Working Nodes
-
-- `tello_adapter`
-- `tello_camera`
-- `tello_image_publisher`
-- `image_listener`
+## ROS image transport topics
+- `/tello/image_raw` → `sensor_msgs/Image`
+- `/tello/image_received` → `std_msgs/Bool`
 
 ---
 
-## What Has Been Completed
+# 4. Current Nodes and Their Roles
 
-### 1. ROS 2 package created
-A Python ROS 2 package named:
+## `tello_adapter`
+Responsible for:
+- creating the Tello object
+- connecting to the drone
+- reading battery percentage
+- publishing telemetry status
 
+Why it exists:
+- before doing anything with vision or perception, the project needed to prove that the machine could reliably talk to the Tello through ROS 2
+
+---
+
+## `tello_camera`
+Responsible for:
+- starting the Tello video stream
+- verifying that frames are arriving
+- publishing frame-alive status and frame dimensions
+
+Why it exists:
+- before trying to publish ROS images, the project needed to prove that raw frames could be acquired reliably from the Tello stream
+
+---
+
+## `tello_image_publisher`
+Responsible for:
+- starting the Tello stream
+- receiving OpenCV frames
+- converting them to ROS `sensor_msgs/Image`
+- publishing `/tello/image_raw`
+
+Why it exists:
+- the final perception stack should consume ROS image topics, not talk directly to DJITelloPy
+
+---
+
+## `image_listener`
+Responsible for:
+- subscribing to `/tello/image_raw`
+- converting ROS images back to OpenCV frames
+- validating that the image pipeline works end-to-end
+- publishing `/tello/image_received`
+
+Why it exists:
+- this validates the image transport chain before any real perception is added
+
+---
+
+# 5. Package and Environment Layout
+
+## ROS 2 workspace
 ```text
-tello_call
+~/ros2_ws
 ```
 
-was created inside the workspace:
-
+## Package root
 ```text
 ~/ros2_ws/src/tello_call
 ```
 
----
-
-### 2. Python virtual environment created
-A virtual environment was created to avoid system Python package conflicts:
-
+## Python virtual environment
 ```text
 ~/tello_venv
 ```
 
-This was necessary because Ubuntu / Debian Python is externally managed, so `pip install` into system Python was blocked.
-
----
-
-### 3. Required Python packages installed inside the virtual environment
-Installed packages include:
-
-- `djitellopy`
-- `opencv-python`
-- `colcon-common-extensions`
-
-Later, ROS-side image transport was also used through:
-
-- `cv_bridge` from ROS Jazzy
-
----
-
-### 4. Interpreter mismatch issue fixed
-A major issue occurred where:
-
-- `python3` inside the virtual environment could import `djitellopy`
-- but `ros2 run tello_call tello_adapter` failed with:
-
+## Helper environment script
 ```text
-ModuleNotFoundError: No module named 'djitellopy'
-```
-
-The cause was that ROS 2 had generated the launcher script with this shebang:
-
-```text
-#!/usr/bin/python3
-```
-
-instead of using the active virtual environment.
-
-This was fixed by adding a `setup.cfg` file in the package root with:
-
-```ini
-[develop]
-script_dir=$base/lib/tello_call
-
-[install]
-install_scripts=$base/lib/tello_call
-
-[build_scripts]
-executable=/usr/bin/env python3
-```
-
-After rebuilding, the launcher respects the active environment.
-
----
-
-### 5. ROS 2 daemon discovery issue identified
-At one point the node was publishing, but `ros2 topic list` showed only:
-
-```text
-/parameter_events
-/rosout
-```
-
-This turned out to be a ROS daemon / discovery issue, not a node failure.
-
-Using:
-
-```bash
-ros2 topic list --no-daemon
-ros2 node list --no-daemon
-```
-
-showed the real topics correctly.
-
-So for debugging, `--no-daemon` is useful.
-
----
-
-### 6. `tello_adapter.py` created and working
-The telemetry node:
-- creates a Tello object
-- connects to the drone
-- reads battery percentage
-- publishes battery and link status to ROS 2 topics
-
-No movement or flight commands are used.
-
----
-
-### 7. `tello_camera.py` created and working
-A camera-health node was added to test the Tello video stream without trying to display frames or publish ROS images yet.
-
-This node:
-- connects to Tello
-- starts the stream
-- reads frames
-- confirms whether a frame is alive
-- publishes width and height
-
-This stage proved the video stream itself worked reliably before introducing `cv_bridge`.
-
----
-
-### 8. `cv_bridge` / NumPy compatibility issue fixed
-When `cv_bridge` was tested, it failed because the ROS Jazzy `cv_bridge` binary had been compiled against NumPy 1.x, while the virtual environment had NumPy 2.x.
-
-This caused an ABI compatibility error.
-
-The fix was to downgrade NumPy inside the virtual environment to a 1.x version.
-
-After that, `cv_bridge` imported and worked correctly.
-
----
-
-### 9. `tello_image_publisher.py` created and working
-A ROS image publisher node was added.
-
-This node:
-- connects to Tello
-- starts the stream
-- grabs OpenCV frames
-- converts them with `cv_bridge`
-- publishes ROS images on:
-
-```text
-/tello/image_raw
-```
-
-It also publishes `/tello/frame_alive`.
-
-This stage proved the Tello camera stream could be turned into a proper ROS image topic.
-
----
-
-### 10. `image_listener.py` created and working
-A ROS image subscriber node was added to validate the full image pipeline.
-
-This node:
-- subscribes to `/tello/image_raw`
-- converts ROS images back to OpenCV frames using `cv_bridge`
-- publishes `/tello/image_received`
-- logs image width, height, and encoding
-
-This proved the full image chain works:
-
-```text
-Tello stream -> OpenCV frame -> ROS image -> subscriber -> OpenCV frame
+~/use_tello_env.sh
 ```
 
 ---
 
-## Current Working Package Structure
+# 6. Reproducing the Project From Scratch
 
-Package root:
+This section describes the exact rebuild process from zero.
 
-```text
-~/ros2_ws/src/tello_call
-```
+## Step 1 — Create the package
 
-Expected structure:
-
-```text
-tello_call/
-├── package.xml
-├── setup.py
-├── setup.cfg
-├── resource/
-│   └── tello_call
-├── launch/
-│   └── ...
-└── tello_call/
-    ├── __init__.py
-    ├── tello_adapter.py
-    ├── tello_camera.py
-    ├── tello_image_publisher.py
-    └── image_listener.py
-```
-
----
-
-## Current Core Files
-
-## `tello_adapter.py`
-
-```python
-import rclpy
-from rclpy.node import Node
-from std_msgs.msg import Int32, Bool
-from djitellopy import Tello
-
-
-class TelloAdapter(Node):
-    def __init__(self) -> None:
-        super().__init__('tello_adapter')
-
-        self.battery_pub = self.create_publisher(Int32, '/tello/battery', 10)
-        self.link_pub = self.create_publisher(Bool, '/tello/link_ok', 10)
-
-        self.tello = None
-        self.connected = False
-
-        self.connect_and_setup()
-
-        self.status_timer = self.create_timer(1.0, self.publish_status)
-
-        self.get_logger().info('Tello adapter started.')
-
-    def connect_and_setup(self) -> None:
-        try:
-            self.get_logger().info('Creating Tello object...')
-            self.tello = Tello()
-
-            self.get_logger().info('Connecting to Tello...')
-            self.tello.connect()
-            self.connected = True
-
-            battery = int(self.tello.get_battery())
-            self.get_logger().info(f'Connected to Tello. Battery: {battery}%')
-
-        except Exception as e:
-            self.connected = False
-            self.get_logger().error(f'Failed to connect/setup Tello: {e}')
-
-    def publish_status(self) -> None:
-        link_msg = Bool()
-        battery_msg = Int32()
-
-        if not self.connected or self.tello is None:
-            link_msg.data = False
-            self.link_pub.publish(link_msg)
-            self.get_logger().warn('Tello not connected.')
-            return
-
-        try:
-            battery = int(self.tello.get_battery())
-
-            link_msg.data = True
-            battery_msg.data = battery
-
-            self.link_pub.publish(link_msg)
-            self.battery_pub.publish(battery_msg)
-
-            self.get_logger().info(f'Published battery={battery}%, link_ok=True')
-
-        except Exception as e:
-            link_msg.data = False
-            self.link_pub.publish(link_msg)
-            self.get_logger().error(f'Failed to read battery/status: {e}')
-
-    def destroy_node(self) -> None:
-        super().destroy_node()
-
-
-def main(args=None) -> None:
-    rclpy.init(args=args)
-    node = TelloAdapter()
-
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        node.get_logger().info('Shutting down Tello adapter.')
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
-```
-
----
-
-## `tello_camera.py`
-
-```python
-import rclpy
-from rclpy.node import Node
-from std_msgs.msg import Bool, Int32
-from djitellopy import Tello
-
-
-class TelloCamera(Node):
-    def __init__(self) -> None:
-        super().__init__('tello_camera')
-
-        self.frame_alive_pub = self.create_publisher(Bool, '/tello/frame_alive', 10)
-        self.frame_width_pub = self.create_publisher(Int32, '/tello/frame_width', 10)
-        self.frame_height_pub = self.create_publisher(Int32, '/tello/frame_height', 10)
-
-        self.tello = None
-        self.frame_read = None
-        self.connected = False
-        self.stream_enabled = False
-
-        self.connect_and_setup()
-
-        self.frame_timer = self.create_timer(0.1, self.check_frame)
-        self.get_logger().info('Tello camera node started.')
-
-    def connect_and_setup(self) -> None:
-        try:
-            self.get_logger().info('Creating Tello object...')
-            self.tello = Tello()
-
-            self.get_logger().info('Connecting to Tello...')
-            self.tello.connect()
-            self.connected = True
-            self.get_logger().info('Connected to Tello.')
-
-            self.get_logger().info('Starting video stream...')
-            self.tello.streamon()
-            self.stream_enabled = True
-
-            self.frame_read = self.tello.get_frame_read()
-            self.get_logger().info('Video stream started.')
-
-        except Exception as e:
-            self.connected = False
-            self.stream_enabled = False
-            self.get_logger().error(f'Failed to connect/setup camera: {e}')
-
-    def check_frame(self) -> None:
-        alive_msg = Bool()
-        width_msg = Int32()
-        height_msg = Int32()
-
-        if not self.connected or not self.stream_enabled or self.frame_read is None:
-            alive_msg.data = False
-            self.frame_alive_pub.publish(alive_msg)
-            self.get_logger().warn('Camera not ready.')
-            return
-
-        try:
-            frame = self.frame_read.frame
-
-            if frame is None:
-                alive_msg.data = False
-                self.frame_alive_pub.publish(alive_msg)
-                self.get_logger().warn('No frame received.')
-                return
-
-            height, width = frame.shape[:2]
-
-            alive_msg.data = True
-            width_msg.data = int(width)
-            height_msg.data = int(height)
-
-            self.frame_alive_pub.publish(alive_msg)
-            self.frame_width_pub.publish(width_msg)
-            self.frame_height_pub.publish(height_msg)
-
-            self.get_logger().info(f'Frame received: width={width}, height={height}')
-
-        except Exception as e:
-            alive_msg.data = False
-            self.frame_alive_pub.publish(alive_msg)
-            self.get_logger().error(f'Failed to read frame: {e}')
-
-    def destroy_node(self) -> None:
-        try:
-            if self.tello is not None and self.stream_enabled:
-                self.tello.streamoff()
-        except Exception as e:
-            self.get_logger().warn(f'Failed to stop stream cleanly: {e}')
-
-        super().destroy_node()
-
-
-def main(args=None) -> None:
-    rclpy.init(args=args)
-    node = TelloCamera()
-
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        node.get_logger().info('Shutting down Tello camera.')
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
-```
-
----
-
-## `tello_image_publisher.py`
-
-```python
-import rclpy
-from rclpy.node import Node
-from sensor_msgs.msg import Image
-from std_msgs.msg import Bool
-from cv_bridge import CvBridge
-from djitellopy import Tello
-
-
-class TelloImagePublisher(Node):
-    def __init__(self) -> None:
-        super().__init__('tello_image_publisher')
-
-        self.image_pub = self.create_publisher(Image, '/tello/image_raw', 10)
-        self.frame_alive_pub = self.create_publisher(Bool, '/tello/frame_alive', 10)
-
-        self.bridge = CvBridge()
-
-        self.tello = None
-        self.frame_read = None
-        self.connected = False
-        self.stream_enabled = False
-
-        self.connect_and_setup()
-
-        self.timer = self.create_timer(0.1, self.publish_image)
-        self.get_logger().info('Tello image publisher started.')
-
-    def connect_and_setup(self) -> None:
-        try:
-            self.get_logger().info('Creating Tello object...')
-            self.tello = Tello()
-
-            self.get_logger().info('Connecting to Tello...')
-            self.tello.connect()
-            self.connected = True
-            self.get_logger().info('Connected to Tello.')
-
-            self.get_logger().info('Starting video stream...')
-            self.tello.streamon()
-            self.stream_enabled = True
-
-            self.frame_read = self.tello.get_frame_read()
-            self.get_logger().info('Video stream started.')
-
-        except Exception as e:
-            self.connected = False
-            self.stream_enabled = False
-            self.get_logger().error(f'Failed to connect/setup image publisher: {e}')
-
-    def publish_image(self) -> None:
-        alive_msg = Bool()
-
-        if not self.connected or not self.stream_enabled or self.frame_read is None:
-            alive_msg.data = False
-            self.frame_alive_pub.publish(alive_msg)
-            self.get_logger().warn('Image publisher not ready.')
-            return
-
-        try:
-            frame = self.frame_read.frame
-
-            if frame is None:
-                alive_msg.data = False
-                self.frame_alive_pub.publish(alive_msg)
-                self.get_logger().warn('No frame received.')
-                return
-
-            image_msg = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
-
-            self.image_pub.publish(image_msg)
-
-            alive_msg.data = True
-            self.frame_alive_pub.publish(alive_msg)
-
-            self.get_logger().info(
-                f'Published image: width={frame.shape[1]}, height={frame.shape[0]}'
-            )
-
-        except Exception as e:
-            alive_msg.data = False
-            self.frame_alive_pub.publish(alive_msg)
-            self.get_logger().error(f'Failed to publish image: {e}')
-
-    def destroy_node(self) -> None:
-        try:
-            if self.tello is not None and self.stream_enabled:
-                self.tello.streamoff()
-        except Exception as e:
-            self.get_logger().warn(f'Failed to stop stream cleanly: {e}')
-
-        super().destroy_node()
-
-
-def main(args=None) -> None:
-    rclpy.init(args=args)
-    node = TelloImagePublisher()
-
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        node.get_logger().info('Shutting down Tello image publisher.')
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
-```
-
----
-
-## `image_listener.py`
-
-```python
-import rclpy
-from rclpy.node import Node
-from sensor_msgs.msg import Image
-from std_msgs.msg import Bool
-from cv_bridge import CvBridge
-
-
-class ImageListener(Node):
-    def __init__(self) -> None:
-        super().__init__('image_listener')
-
-        self.bridge = CvBridge()
-
-        self.image_received_pub = self.create_publisher(Bool, '/tello/image_received', 10)
-
-        self.create_subscription(
-            Image,
-            '/tello/image_raw',
-            self.image_callback,
-            10
-        )
-
-        self.last_image_time = None
-        self.watchdog_timer = self.create_timer(1.0, self.check_image_health)
-
-        self.get_logger().info('Image listener started.')
-
-    def image_callback(self, msg: Image) -> None:
-        try:
-            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-            self.last_image_time = self.get_clock().now()
-
-            received_msg = Bool()
-            received_msg.data = True
-            self.image_received_pub.publish(received_msg)
-
-            height, width = frame.shape[:2]
-            self.get_logger().info(
-                f'Received image: width={width}, height={height}, encoding={msg.encoding}'
-            )
-
-        except Exception as e:
-            received_msg = Bool()
-            received_msg.data = False
-            self.image_received_pub.publish(received_msg)
-            self.get_logger().error(f'Failed to convert incoming image: {e}')
-
-    def check_image_health(self) -> None:
-        msg = Bool()
-
-        if self.last_image_time is None:
-            msg.data = False
-            self.image_received_pub.publish(msg)
-            self.get_logger().warn('No image received yet.')
-            return
-
-        age_sec = (self.get_clock().now() - self.last_image_time).nanoseconds / 1e9
-
-        if age_sec > 2.0:
-            msg.data = False
-            self.image_received_pub.publish(msg)
-            self.get_logger().warn(f'Image stream stale: last image {age_sec:.2f}s ago')
-
-    def destroy_node(self) -> None:
-        super().destroy_node()
-
-
-def main(args=None) -> None:
-    rclpy.init(args=args)
-    node = ImageListener()
-
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        node.get_logger().info('Shutting down image listener.')
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
-```
-
----
-
-## How to Recreate Everything from Scratch
-
-### Step 1 — Create the ROS 2 package
+From the workspace source directory:
 
 ```bash
 cd ~/ros2_ws/src
 ros2 pkg create --build-type ament_python tello_call
 ```
 
+This creates the base Python ROS 2 package.
+
 ---
 
-### Step 2 — Create the virtual environment
+## Step 2 — Create a virtual environment
+
+A virtual environment is required because installing packages directly into the system Python was blocked by the OS package-management policy.
+
+Create it with:
 
 ```bash
 cd ~
 python3 -m venv tello_venv
 ```
 
-If that fails:
+If `venv` is missing:
 
 ```bash
 sudo apt install python3-venv
@@ -703,49 +256,43 @@ sudo apt install python3-venv
 
 ---
 
-### Step 3 — Activate the environment
+## Step 3 — Activate the environment
 
 ```bash
 source ~/tello_venv/bin/activate
 ```
 
+You should see the shell prompt change to indicate the virtual environment is active.
+
 ---
 
-### Step 4 — Install required Python packages
+## Step 4 — Install required Python packages
+
+Inside the activated environment:
 
 ```bash
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install djitellopy opencv-python colcon-common-extensions
 ```
 
----
-
-### Step 5 — If `cv_bridge` later fails with NumPy compatibility issues
-
-Downgrade NumPy in the virtual environment:
-
-```bash
-python -m pip install "numpy<2"
-```
-
-Then verify:
-
-```bash
-python -c "import numpy; print(numpy.__version__)"
-python -c "import cv_bridge; print('cv_bridge ok')"
-```
+These packages are needed for:
+- Tello communication
+- OpenCV frame handling
+- ROS 2 build tooling inside the same Python environment
 
 ---
 
-### Step 6 — Create `setup.cfg`
+## Step 5 — Create `setup.cfg`
 
-File:
+This file is critical. Without it, ROS 2 may generate launcher scripts that hardcode `/usr/bin/python3` instead of respecting the active virtual environment.
+
+Create:
 
 ```text
 ~/ros2_ws/src/tello_call/setup.cfg
 ```
 
-Content:
+with:
 
 ```ini
 [develop]
@@ -758,58 +305,35 @@ install_scripts=$base/lib/tello_call
 executable=/usr/bin/env python3
 ```
 
-This is required so `ros2 run` uses the Python interpreter from the active environment.
+This ensures `ros2 run` uses the environment Python rather than the system Python.
 
 ---
 
-### Step 7 — Edit `setup.py`
+## Step 6 — Update `setup.py`
 
-Make sure `setup.py` includes the console entries for all current nodes.
+`setup.py` must register the node entry points in `console_scripts`.
 
-Example:
+At the current stage, the package should register:
 
-```python
-from setuptools import setup
+- `tello_adapter`
+- `tello_camera`
+- `tello_image_publisher`
+- `image_listener`
 
-package_name = 'tello_call'
-
-setup(
-    name=package_name,
-    version='0.0.1',
-    packages=[package_name],
-    data_files=[
-        ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
-        ('share/' + package_name, ['package.xml']),
-    ],
-    install_requires=['setuptools'],
-    zip_safe=True,
-    maintainer='kush',
-    maintainer_email='you@example.com',
-    description='Tello ROS 2 project',
-    license='MIT',
-    tests_require=['pytest'],
-    entry_points={
-        'console_scripts': [
-            'tello_adapter = tello_call.tello_adapter:main',
-            'tello_camera = tello_call.tello_camera:main',
-            'tello_image_publisher = tello_call.tello_image_publisher:main',
-            'image_listener = tello_call.image_listener:main',
-        ],
-    },
-)
-```
+Since the full package files will be uploaded separately, keep `setup.py` synchronized with the scripts included in the package.
 
 ---
 
-### Step 8 — Add the Python node files
+## Step 7 — Add the package files
 
-Place the files at:
+Place the node files inside:
 
 ```text
 ~/ros2_ws/src/tello_call/tello_call/
 ```
 
-Files:
+At the current stage, the relevant node files are:
+
 - `tello_adapter.py`
 - `tello_camera.py`
 - `tello_image_publisher.py`
@@ -817,7 +341,9 @@ Files:
 
 ---
 
-### Step 9 — Rebuild cleanly
+## Step 8 — Rebuild the workspace cleanly
+
+From the workspace root:
 
 ```bash
 cd ~/ros2_ws
@@ -828,9 +354,11 @@ colcon build --packages-select tello_call --symlink-install
 source install/setup.bash
 ```
 
+This is the clean rebuild sequence used throughout development.
+
 ---
 
-### Step 10 — Verify launcher uses environment Python
+## Step 9 — Verify the generated launcher uses the correct interpreter
 
 Check one of the installed launchers:
 
@@ -838,17 +366,23 @@ Check one of the installed launchers:
 head -n 1 ~/ros2_ws/install/tello_call/lib/tello_call/tello_adapter
 ```
 
-It should show:
+The correct result is:
 
 ```text
 #!/usr/bin/env python3
 ```
 
-If it says `/usr/bin/python3`, the environment fix is not applied correctly.
+If it instead shows:
+
+```text
+#!/usr/bin/python3
+```
+
+then ROS 2 is still using the system interpreter, which will cause environment-specific imports such as `djitellopy` to fail.
 
 ---
 
-### Step 11 — Create helper script for new terminals
+## Step 10 — Create a helper script for every terminal
 
 Create:
 
@@ -864,17 +398,23 @@ source /opt/ros/jazzy/setup.bash
 source ~/ros2_ws/install/setup.bash
 ```
 
-Then in every new terminal:
+Then in every new terminal, use:
 
 ```bash
 source ~/use_tello_env.sh
 ```
 
+This avoids repeated interpreter and environment mistakes.
+
 ---
 
-## How to Run the Current Stages
+# 7. How to Run Each Working Stage
 
-### Telemetry stage
+## A. Telemetry stage
+
+Connect the laptop to the Tello Wi-Fi first.
+
+Then run:
 
 ```bash
 source ~/use_tello_env.sh
@@ -891,9 +431,16 @@ ros2 topic echo /tello/battery --no-daemon
 ros2 topic echo /tello/link_ok --no-daemon
 ```
 
+Expected result:
+- `/tello_adapter` should appear
+- `/tello/battery` should publish battery values
+- `/tello/link_ok` should publish `true`
+
 ---
 
-### Camera frame-health stage
+## B. Frame-health stage
+
+Run:
 
 ```bash
 source ~/use_tello_env.sh
@@ -909,18 +456,22 @@ ros2 topic echo /tello/frame_width --no-daemon
 ros2 topic echo /tello/frame_height --no-daemon
 ```
 
+Expected result:
+- `frame_alive` becomes `true`
+- width and height are published
+
 ---
 
-### ROS image publishing stage
+## C. ROS image publishing stage
 
-Run the publisher:
+Run:
 
 ```bash
 source ~/use_tello_env.sh
 ros2 run tello_call tello_image_publisher
 ```
 
-Then inspect:
+In another terminal:
 
 ```bash
 source ~/use_tello_env.sh
@@ -929,9 +480,13 @@ ros2 topic info /tello/image_raw --no-daemon
 ros2 topic echo /tello/frame_alive --no-daemon
 ```
 
+Expected result:
+- `/tello/image_raw` exists
+- `/tello/frame_alive` becomes `true`
+
 ---
 
-### ROS image subscriber stage
+## D. ROS image subscriber stage
 
 Run the publisher in one terminal:
 
@@ -940,7 +495,7 @@ source ~/use_tello_env.sh
 ros2 run tello_call tello_image_publisher
 ```
 
-Run the subscriber in another:
+Run the subscriber in another terminal:
 
 ```bash
 source ~/use_tello_env.sh
@@ -954,107 +509,270 @@ source ~/use_tello_env.sh
 ros2 topic echo /tello/image_received --no-daemon
 ```
 
----
-
-## Troubleshooting
-
-### Problem: `ModuleNotFoundError: No module named 'djitellopy'`
-Cause:
-- node is being run with system Python instead of the virtual environment
-
-Fix:
-- activate the venv
-- ensure `setup.cfg` exists
-- rebuild cleanly
-- verify launcher shebang
+Expected result:
+- `/tello/image_received` becomes `true`
+- the listener logs image width, height, and encoding
 
 ---
 
-### Problem: `ros2 topic list` only shows `/parameter_events` and `/rosout`
-Cause:
-- stale ROS daemon / graph discovery issue
+# 8. Development Challenges and How They Were Solved
 
-Fix:
+This section is important because it captures the real engineering problems that appeared during development.
+
+## Challenge 1 — `djitellopy` could be imported in Python but not by `ros2 run`
+
+### Symptom
+Inside the virtual environment:
 
 ```bash
-ros2 daemon stop
-ros2 daemon start
+python3 -c "import djitellopy"
+```
+
+worked.
+
+But:
+
+```bash
+ros2 run tello_call tello_adapter
+```
+
+failed with:
+
+```text
+ModuleNotFoundError: No module named 'djitellopy'
+```
+
+### Diagnosis
+The problem was not that `djitellopy` was missing. The problem was that ROS 2 was launching the node with the wrong interpreter.
+
+This was confirmed by checking the installed launcher:
+
+```bash
+head -n 1 ~/ros2_ws/install/tello_call/lib/tello_call/tello_adapter
+```
+
+It showed:
+
+```text
+#!/usr/bin/python3
+```
+
+That meant the node was being run with system Python, not the virtual environment.
+
+### Resolution
+Add `setup.cfg` with:
+
+```ini
+[build_scripts]
+executable=/usr/bin/env python3
+```
+
+Then rebuild cleanly.
+
+After that, the launcher respected the active environment.
+
+---
+
+## Challenge 2 — Ubuntu blocked system-wide `pip install`
+
+### Symptom
+Trying to install Python packages system-wide caused an error about an externally managed environment.
+
+### Diagnosis
+The OS Python installation was protected by package-management policy.
+
+### Resolution
+A dedicated virtual environment was created:
+
+```bash
+python3 -m venv ~/tello_venv
+```
+
+All project-specific Python packages were installed there instead.
+
+---
+
+## Challenge 3 — ROS topics were being published, but `ros2 topic list` did not show them
+
+### Symptom
+The node logs showed publishers firing, but `ros2 topic list` only showed:
+
+```text
+/parameter_events
+/rosout
+```
+
+### Diagnosis
+This was not a publisher bug. It was a ROS graph discovery / daemon issue.
+
+### Resolution
+Using:
+
+```bash
 ros2 topic list --no-daemon
 ros2 node list --no-daemon
 ```
 
+showed the real graph.
+
+Restarting the daemon also helped:
+
+```bash
+ros2 daemon stop
+ros2 daemon start
+```
+
+### Practical lesson
+When ROS graph results look wrong, verify with `--no-daemon` before changing code unnecessarily.
+
 ---
 
-### Problem: `cv_bridge` import fails with NumPy ABI errors
-Cause:
-- `cv_bridge` binary built against NumPy 1.x
-- virtual environment has NumPy 2.x
+## Challenge 4 — `cv_bridge` failed because of NumPy compatibility
 
-Fix:
+### Symptom
+Importing `cv_bridge` produced an error explaining that the module had been built with NumPy 1.x but was being used with NumPy 2.x.
+
+### Diagnosis
+The ROS Jazzy `cv_bridge` binary was compiled against NumPy 1.x, while the virtual environment had NumPy 2.x installed.
+
+### Resolution
+Downgrade NumPy inside the virtual environment:
 
 ```bash
 python -m pip install "numpy<2"
 ```
 
----
+Then verify:
 
-### Problem: Tello connects unreliably
-Possible causes:
-- wrong Wi-Fi network
-- stale Tello state
-- temporary packet issues
+```bash
+python -c "import numpy; print(numpy.__version__)"
+python -c "import cv_bridge; print('cv_bridge ok')"
+```
 
-Notes:
-- one transient decode error was seen earlier, but the connection succeeded immediately after retry
-- if the node reports connection success and battery, the basic link is working
+After that, `cv_bridge` worked correctly.
 
 ---
 
-## What Has Not Been Built Yet
+## Challenge 5 — Tello connection included a transient decode error
 
-These are intentionally **not implemented yet**:
+### Symptom
+During one connection attempt, a UTF-8 decode error appeared before a successful retry.
+
+### Diagnosis
+This appeared to be a transient bad or noisy packet rather than a fatal communication failure, because the next command succeeded and the Tello connected normally.
+
+### Resolution
+No code redesign was needed at this stage. The connection was reattempted and the Tello entered command mode successfully.
+
+### Practical lesson
+Not every single console error means the node architecture is wrong. Look at the full sequence and decide whether the system actually recovered.
+
+---
+
+## Challenge 6 — OpenCV display path risked complicating debugging too early
+
+### Symptom
+During earlier testing, the video path and GUI path risked becoming mixed together, which made it harder to isolate whether failures were due to:
+- ROS timers
+- stream startup
+- frame acquisition
+- GUI behavior
+- Wayland / display issues
+
+### Diagnosis
+Too many subsystems were being tested at once.
+
+### Resolution
+The system was broken into distinct stages:
+1. telemetry only
+2. frame-health only
+3. ROS image publishing
+4. ROS image subscribing
+
+### Practical lesson
+Isolate one subsystem at a time.  
+Do not mix hardware, ROS messaging, image transport, GUI, and perception in the same debugging step unless necessary.
+
+---
+
+# 9. Why the Project Was Built in This Order
+
+This order was deliberate.
+
+## First: telemetry
+Before anything else, the project needed to prove:
+- the Tello could connect
+- battery could be read
+- ROS 2 publishers worked
+
+## Second: frame health
+Before publishing ROS images, the project needed to prove:
+- the stream starts
+- frames actually arrive
+
+## Third: ROS image publishing
+Only after raw frame reception worked did it make sense to add `cv_bridge` and publish `/tello/image_raw`
+
+## Fourth: ROS image subscribing
+Only after publishing worked did it make sense to validate the receive side
+
+This layered approach reduced confusion and made each problem easier to isolate.
+
+---
+
+# 10. What Has Not Been Built Yet
+
+These are intentionally still pending:
 
 - hand detection
 - gesture recognition
 - human pose estimation
+- command gating
 - supervisor/state machine
-- approach logic
-- flight command node
+- motion logic
 - landing logic
-- integrated single hardware interface node
+- final integrated Tello interface architecture
 
-That is good. The project is still being built in layers.
-
----
-
-## Recommended Next Stage
-
-The next clean stage is:
-
-### `hand_detector.py`
-A subscriber node that:
-- subscribes to `/tello/image_raw`
-- runs MediaPipe Hands
-- publishes a simple boolean topic like:
-  - `/tello/hand_detected`
-
-That should be the first real perception node.
+That is correct and expected. The current focus has been on building a clean, verified foundation.
 
 ---
 
-## Summary
+# 11. Recommended Next Stage
 
-At the current stage, the project has a verified ROS 2 and hardware baseline with image transport:
+The next clean step is:
 
-- package exists
-- virtual environment works
-- interpreter issue was fixed
-- ROS daemon discovery issue was understood
-- Tello can connect
-- battery can be read
-- video stream can be received
-- camera frame health can be checked
-- ROS images can be published
-- ROS images can be subscribed to and decoded
+## `hand_detector.py`
 
-That is the correct foundation before moving to perception and then control.
+This should be the first actual perception node.
+
+It should:
+- subscribe to `/tello/image_raw`
+- run MediaPipe Hands
+- publish a simple topic such as:
+  - `/tello/hand_detected` (`std_msgs/Bool`)
+
+This keeps the next milestone small and measurable.
+
+It does **not** need to do classification yet. The first job is simply:
+
+**Can the system reliably detect the presence of a hand in the Tello image stream?**
+
+That should come before gesture vocabulary, state machines, or control logic.
+
+---
+
+# 12. Final Summary
+
+At the current stage, the project has successfully built and validated:
+
+- ROS 2 package structure
+- virtual environment workflow
+- environment-aware ROS launcher configuration
+- Tello telemetry access
+- Tello video stream access
+- frame-health validation
+- ROS image publishing
+- ROS image subscribing
+- resolution of the major environment and compatibility issues encountered so far
+
+This is the correct foundation for the next phase of the project: **perception**.
