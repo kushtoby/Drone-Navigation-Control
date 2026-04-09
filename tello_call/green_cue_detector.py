@@ -1,0 +1,232 @@
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+from std_msgs.msg import Bool, Int32
+from cv_bridge import CvBridge
+import cv2
+import numpy as np
+from collections import deque
+import math
+
+
+class GreenCueDetector(Node):
+    def __init__(self) -> None:
+        super().__init__('green_cue_detector')
+
+        self.bridge = CvBridge()
+
+        self.detected_pub = self.create_publisher(Bool, '/tello/green_cue_detected', 10)
+        self.cx_pub = self.create_publisher(Int32, '/tello/green_cue_center_x', 10)
+        self.cy_pub = self.create_publisher(Int32, '/tello/green_cue_center_y', 10)
+        self.area_pub = self.create_publisher(Int32, '/tello/green_cue_area', 10)
+
+        self.create_subscription(
+            Image,
+            '/tello/image_raw',
+            self.image_callback,
+            10
+        )
+
+        self.window_name = 'Green Round Cue Detector'
+        self.show_debug = True
+
+        # Green threshold for the wrapped cue
+        self.lower_green = np.array([35, 50, 50], dtype=np.uint8)
+        self.upper_green = np.array([95, 255, 255], dtype=np.uint8)
+
+        # Size threshold based on your earlier real cue observations
+        self.min_area = 1800
+
+        # Ignore lower part of frame where floor markings often appear
+        self.roi_top_frac = 0.0
+        self.roi_bottom_frac = 0.85
+
+        # Circularity / roundness settings
+        self.min_circularity = 0.55
+        self.min_radius = 18
+
+        # Temporal confirmation
+        self.history = deque(maxlen=5)
+        self.required_hits = 3
+
+        self.get_logger().info('Green round cue detector started.')
+
+    def image_callback(self, msg: Image) -> None:
+        detected_msg = Bool()
+        cx_msg = Int32()
+        cy_msg = Int32()
+        area_msg = Int32()
+
+        try:
+            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            h_img, w_img = frame.shape[:2]
+
+            y0 = int(self.roi_top_frac * h_img)
+            y1 = int(self.roi_bottom_frac * h_img)
+
+            roi = frame[y0:y1, :]
+            hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+
+            mask = cv2.inRange(hsv, self.lower_green, self.upper_green)
+
+            kernel = np.ones((5, 5), np.uint8)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+            contours, _ = cv2.findContours(
+                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+
+            raw_detected = False
+            best_area = 0
+            best_bbox = None
+            best_center = None
+            best_score = -1e18
+            best_circularity = 0.0
+            best_radius = 0.0
+
+            img_cx = w_img // 2
+            img_cy = h_img // 2
+
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                if area < self.min_area:
+                    continue
+
+                perimeter = cv2.arcLength(cnt, True)
+                if perimeter <= 0:
+                    continue
+
+                circularity = 4.0 * math.pi * area / (perimeter * perimeter)
+
+                (circle_x, circle_y), radius = cv2.minEnclosingCircle(cnt)
+                if radius < self.min_radius:
+                    continue
+
+                x, y, w, h = cv2.boundingRect(cnt)
+                if w < 30 or h < 30:
+                    continue
+
+                aspect_ratio = w / float(h) if h > 0 else 0.0
+                if aspect_ratio > 1.8 or aspect_ratio < 0.55:
+                    continue
+
+                rect_area = w * h
+                fill_ratio = area / float(rect_area) if rect_area > 0 else 0.0
+                if fill_ratio < 0.35:
+                    continue
+
+                if circularity < self.min_circularity:
+                    continue
+
+                # Convert ROI coordinates back to full-frame coordinates
+                full_x = x
+                full_y = y + y0
+                cx = full_x + w // 2
+                cy = full_y + h // 2
+
+                full_circle_center = (int(circle_x), int(circle_y + y0))
+
+                # Prefer larger, rounder blobs closer to image center
+                dist = ((cx - img_cx) ** 2 + (cy - img_cy) ** 2) ** 0.5
+                score = area + 1200.0 * circularity - 2.0 * dist
+
+                if score > best_score:
+                    best_score = score
+                    best_area = int(area)
+                    best_bbox = (full_x, full_y, w, h, full_circle_center, int(radius))
+                    best_center = (cx, cy)
+                    best_circularity = circularity
+                    best_radius = radius
+                    raw_detected = True
+
+            self.history.append(1 if raw_detected else 0)
+            confirmed = sum(self.history) >= self.required_hits
+
+            detected_msg.data = confirmed
+            self.detected_pub.publish(detected_msg)
+
+            if confirmed and best_bbox is not None and best_center is not None:
+                cx_msg.data = int(best_center[0])
+                cy_msg.data = int(best_center[1])
+                area_msg.data = int(best_area)
+
+                self.cx_pub.publish(cx_msg)
+                self.cy_pub.publish(cy_msg)
+                self.area_pub.publish(area_msg)
+
+                self.get_logger().info(
+                    f'Green round cue detected: center=({cx_msg.data}, {cy_msg.data}), '
+                    f'area={area_msg.data}, circularity={best_circularity:.3f}, '
+                    f'radius={best_radius:.1f}, history={list(self.history)}'
+                )
+
+                if self.show_debug:
+                    x, y, w, h, circle_center, radius = best_bbox
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    cv2.circle(frame, best_center, 5, (0, 0, 255), -1)
+                    cv2.circle(frame, circle_center, radius, (255, 0, 255), 2)
+
+                    cv2.putText(
+                        frame,
+                        f'DET area={best_area} circ={best_circularity:.2f}',
+                        (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.75,
+                        (0, 255, 0),
+                        2,
+                        cv2.LINE_AA,
+                    )
+            else:
+                self.get_logger().info(
+                    f'Green round cue not confirmed. raw_detected={raw_detected}, history={list(self.history)}'
+                )
+
+                if self.show_debug:
+                    cv2.putText(
+                        frame,
+                        f'NOT DETECTED hist={list(self.history)}',
+                        (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.75,
+                        (0, 0, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
+
+            if self.show_debug:
+                cv2.line(frame, (0, y1), (w_img, y1), (255, 0, 0), 2)
+
+                cv2.imshow(self.window_name, frame)
+                cv2.imshow('Green Mask', mask)
+
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    cv2.destroyWindow(self.window_name)
+                    cv2.destroyWindow('Green Mask')
+                    self.show_debug = False
+
+        except Exception as e:
+            detected_msg.data = False
+            self.detected_pub.publish(detected_msg)
+            self.get_logger().error(f'Green round cue detection failed: {e}')
+
+    def destroy_node(self) -> None:
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
+        super().destroy_node()
+
+
+def main(args=None) -> None:
+    rclpy.init(args=args)
+    node = GreenCueDetector()
+
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        node.get_logger().info('Shutting down green round cue detector.')
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
