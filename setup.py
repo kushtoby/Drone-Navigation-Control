@@ -29,6 +29,7 @@ setup(
             'tello_camera = tello_call.tello_camera:main',
             'tello_image_publisher = tello_call.tello_image_publisher:main',
             'image_listener = tello_call.image_listener:main',
+            'hand_detector = tello_call.hand_detector:main',
         ],
     },
 )
