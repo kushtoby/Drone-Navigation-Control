@@ -31,7 +31,7 @@ setup(
             'image_listener = tello_call.image_listener:main',
             'hand_detector = tello_call.hand_detector:main',
             'hand_debug_viewer = tello_call.hand_debug_viewer:main',
-            'green_cue_detector = tello_call.green_cue_detector:main',
+            'pink_balloon_detector = tello_call.pink_balloon_detector:main',
         ],
     },
 )

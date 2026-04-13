@@ -2,42 +2,40 @@
 
 ## Purpose of This Document
 
-This README is a **professional reconstruction guide** for the current state of the Tello ROS 2 project.
+This README is a professional reconstruction guide for the current state of the Tello ROS 2 project.
 
 It is written so that someone else can:
-
 - understand what has already been built
 - understand why it was built in this order
 - reproduce the current working setup from scratch
 - understand the main problems that came up during development
 - know exactly how those problems were diagnosed and resolved
 
-This version is intentionally different from a short project summary.  
-It is a **walkthrough**.
+This is intentionally a walkthrough, not just a short summary.
 
-Since the full package files will be uploaded separately, this document does **not** include all script contents inline. Instead, it explains:
-
+Since the full package files will be uploaded separately, this document does not inline every script. Instead, it explains:
 - what each node does
 - how the system evolved
 - what configuration changes were required
 - what commands to run
 - what failures happened
 - how those failures were resolved
+- which approaches were tried and later abandoned
 
-At the current stage, the project still does **not** yet implement:
+At the current stage, the project still does not yet implement:
 - gesture recognition
 - supervisor logic
 - motion commands
 - landing logic
 - the final integrated multi-node drone interface
 
-What *has* been completed is the ROS 2, Tello communication, image transport, and first perception baseline needed before control can be added.
+What has been completed is the ROS 2, Tello communication, image transport, first perception baseline, and the first long-range cue-detection baseline needed before control can be added.
 
 ---
 
 # 1. Current Project Scope
 
-The current system has successfully validated five major stages:
+The current system has successfully validated six major stages:
 
 1. **Telemetry stage**
    - Tello connection
@@ -64,8 +62,14 @@ The current system has successfully validated five major stages:
    - hand presence detection
    - hand count publishing
 
-This means the project has already proven:
+6. **Long-range cue-detection stage**
+   - multiple colored-object experiments
+   - green cue detection experiments
+   - orange balloon experiments
+   - final shift to pink balloon detection
+   - final shift from circularity-prioritized logic to pixel-count-prioritized logic
 
+This means the project has already proven:
 - ROS 2 package execution works
 - Python environment management works
 - DJITelloPy works with the Tello
@@ -75,6 +79,8 @@ This means the project has already proven:
 - ROS image transport can be used successfully
 - MediaPipe can process the live Tello image feed
 - live hand detection from the Tello camera works through ROS 2
+- a long-range colored cue can be detected from the Tello feed
+- cue-detection logic can be adapted when lighting and glare break shape assumptions
 
 ---
 
@@ -125,7 +131,7 @@ image_listener
 /tello/image_received
 ```
 
-## First perception pipeline
+## Hand-perception pipeline
 
 ```text
 /tello/image_raw
@@ -136,13 +142,26 @@ hand_detector
 /tello/hand_count
 ```
 
+## Long-range cue pipeline (current direction)
+
+```text
+/tello/image_raw
+   ↓
+pink_balloon_detector
+   ↓
+/tello/pink_balloon_detected
+/tello/pink_balloon_center_x
+/tello/pink_balloon_center_y
+/tello/pink_balloon_area
+```
+
 ## Important architectural note
 
-At the current stage, these nodes are **validated independently**.
+At the current stage, these nodes are validated independently.
 
 That is intentional.
 
-Each node currently creates its own `Tello()` object when it owns the drone-side connection. That is acceptable for testing one stage at a time, but it is **not** the final architecture for the full project.
+Each node that owns the drone-side connection currently creates its own `Tello()` object. That is acceptable for stage-by-stage testing, but it is not the final architecture for the full project.
 
 The final integrated system will eventually need a cleaner hardware interface design so multiple high-level nodes are not all trying to own the drone connection separately.
 
@@ -163,9 +182,15 @@ The final integrated system will eventually need a cleaner hardware interface de
 - `/tello/image_raw` → `sensor_msgs/Image`
 - `/tello/image_received` → `std_msgs/Bool`
 
-## First perception topics
+## Hand-perception topics
 - `/tello/hand_detected` → `std_msgs/Bool`
 - `/tello/hand_count` → `std_msgs/Int32`
+
+## Current long-range cue topics
+- `/tello/pink_balloon_detected` → `std_msgs/Bool`
+- `/tello/pink_balloon_center_x` → `std_msgs/Int32`
+- `/tello/pink_balloon_center_y` → `std_msgs/Int32`
+- `/tello/pink_balloon_area` → `std_msgs/Int32`
 
 ---
 
@@ -230,6 +255,23 @@ Responsible for:
 Why it exists:
 - this is the first real perception node
 - it proves the system can detect a live hand from the Tello image feed before attempting gesture classification
+
+---
+
+## `pink_balloon_detector`
+Responsible for:
+- subscribing to `/tello/image_raw`
+- thresholding the balloon color in HSV
+- cleaning the mask
+- using color-pixel count as the main trigger
+- selecting a reasonable blob to recover center and approximate blob area
+- publishing balloon detection state and location topics
+
+Why it exists:
+- long-range detection at 20 ft is too weak for hand-only perception
+- the balloon provides a larger, simpler visual cue
+- glare and distance made circularity unreliable as the main criterion
+- pixel count proved more robust than perfect-shape assumptions
 
 ---
 
@@ -371,6 +413,7 @@ At the current stage, the package should register:
 - `tello_image_publisher`
 - `image_listener`
 - `hand_detector`
+- `pink_balloon_detector`
 
 Since the full package files will be uploaded separately, keep `setup.py` synchronized with the scripts included in the package.
 
@@ -391,6 +434,9 @@ At the current stage, the relevant node files are:
 - `tello_image_publisher.py`
 - `image_listener.py`
 - `hand_detector.py`
+- `pink_balloon_detector.py`
+
+Note: earlier experimental cue-detector files for green and orange were removed once they were no longer the chosen direction.
 
 ---
 
@@ -536,7 +582,6 @@ python -c "import mediapipe as mp; print('mediapipe', mp.__version__, 'solutions
 ```
 
 The working results were:
-
 - `numpy 1.26.4`
 - `cv2 4.11.0`
 - `cv_bridge ok`
@@ -684,6 +729,39 @@ A successful log line from the working system looked like:
 ```text
 [INFO] ... [hand_detector]: Hand detection: detected=True, hand_count=1
 ```
+
+---
+
+## F. Current long-range cue stage — pink balloon detection
+
+Run the image publisher in one terminal:
+
+```bash
+source ~/use_tello_env.sh
+ros2 run tello_call tello_image_publisher
+```
+
+Run the balloon detector in another terminal:
+
+```bash
+source ~/use_tello_env.sh
+ros2 run tello_call pink_balloon_detector
+```
+
+Then inspect:
+
+```bash
+source ~/use_tello_env.sh
+ros2 topic echo /tello/pink_balloon_detected --no-daemon
+ros2 topic echo /tello/pink_balloon_center_x --no-daemon
+ros2 topic echo /tello/pink_balloon_center_y --no-daemon
+ros2 topic echo /tello/pink_balloon_area --no-daemon
+```
+
+Expected result:
+- at long range the balloon may appear mainly as a color blob rather than a perfect geometric object
+- detection should still succeed if enough target-color pixels are present over multiple frames
+- center and approximate blob area should still be published when detection is confirmed
 
 ---
 
@@ -860,7 +938,6 @@ The environment temporarily contained incompatible package expectations while th
 
 ### Resolution
 The environment was accepted as working only after direct import checks confirmed:
-
 - NumPy imports correctly
 - OpenCV imports correctly
 - `cv_bridge` imports correctly
@@ -910,9 +987,103 @@ The system was intentionally broken into distinct stages:
 3. ROS image publishing
 4. ROS image subscribing
 5. hand detection
+6. long-range cue detection
 
 ### Practical lesson
 Isolate one subsystem at a time.
+
+---
+
+## Challenge 9 — Hand detection worked only at shorter distances
+
+### Symptom
+MediaPipe hand detection performed well at short range but did not provide a reliable long-range trigger for the required 20-ft scenario.
+
+### Diagnosis
+At longer distances, the hand occupies too few pixels in the frame, and detector performance becomes strongly dependent on image scale, contrast, and lighting.
+
+### Resolution
+The project shifted from relying on hand detection as the long-range acquisition method to using a larger colored cue object instead.
+
+### Practical lesson
+A cue that is too small in the image should not be forced into a role it is not visually strong enough to serve.
+
+---
+
+## Challenge 10 — Skin-tone and lighting sensitivity affected hand detection
+
+### Symptom
+Hand detection quality was inconsistent across users and conditions.
+
+### Diagnosis
+The pretrained detector was sensitive to the combination of hand appearance, lighting, background clutter, and apparent hand size in the frame.
+
+### Resolution
+The project stopped treating hand perception as the only cue for the long-range problem and instead reserved hand detection for closer-range perception.
+
+### Practical lesson
+Separate long-range acquisition from closer-range fine perception when one model cannot robustly serve both roles.
+
+---
+
+## Challenge 11 — Green cue experiments produced false positives
+
+### Symptom
+Green cue detection picked up unrelated scene elements such as other greenish objects and floor markings.
+
+### Diagnosis
+The HSV thresholding worked, but the environment contained enough similar hues that the detector started seeing other objects as candidates.
+
+### Resolution
+The detector was tightened with additional filtering, but this reduced long-range sensitivity.
+
+Ultimately, the green approach was not kept as the final direction and the green-cue code was removed.
+
+### Practical lesson
+A detector can fail by being too permissive or by becoming so strict that it loses the real target. Both sides of that tradeoff must be tested.
+
+---
+
+## Challenge 12 — Orange balloon appearance was distorted in the Tello feed
+
+### Symptom
+The orange balloon did not appear as a clean, stable orange target in the Tello image feed and looked shifted enough to make reliable tuning awkward.
+
+### Diagnosis
+The balloon’s real-world color was less important than how the Tello camera actually rendered it under the available lighting. Auto white balance, exposure, and small-camera color rendering made the orange cue less trustworthy than expected.
+
+### Resolution
+The project stopped pursuing the orange balloon as the main direction and the orange-balloon code was removed.
+
+### Practical lesson
+The correct cue color is the one that is stable in the actual sensing pipeline, not necessarily the one that looks ideal to the human eye.
+
+---
+
+## Challenge 13 — Circularity failed under glare and long-range appearance changes
+
+### Symptom
+At long distance, and especially under glare, the balloon often stopped looking like a clean circular object. The detector could still “see” the balloon color, but the contour was often partial, distorted, or not round enough to satisfy circularity-heavy logic.
+
+### Diagnosis
+The balloon was still present as a color region, but glare and distance degraded its apparent boundary quality. Circularity therefore became an unreliable primary trigger even though the color mask remained useful.
+
+### Resolution
+The detector design shifted from circularity-prioritized logic to pixel-count-prioritized logic.
+
+The final reasoning was:
+- at 20 ft, the cue may only appear as a small, stable color blob
+- that is still enough to trigger acquisition
+- demanding a perfect circle at that range is unnecessarily fragile
+
+The detector now:
+- keeps the same working HSV thresholds
+- uses target-color pixel count as the main raw trigger
+- uses temporal confirmation across recent frames
+- still recovers blob center and approximate area from the largest valid region
+
+### Practical lesson
+At long range, reliable blob evidence can matter more than perfect geometry.
 
 ---
 
@@ -940,14 +1111,41 @@ Only after publishing worked did it make sense to validate the receive side
 ## Fifth: hand detection
 Only after the ROS image pipeline worked end-to-end did it make sense to add MediaPipe-based perception
 
+## Sixth: long-range cue detection
+Only after the basic perception stack worked did it make sense to explore a larger acquisition cue appropriate for the 20-ft requirement
+
 This layered approach reduced confusion and made each problem easier to isolate.
 
 ---
 
-# 12. What Has Not Been Built Yet
+# 12. Current Detection Strategy Rationale
+
+The project has now effectively split the perception problem into two roles:
+
+## Closer-range perception
+Handled by:
+- `hand_detector`
+
+Purpose:
+- determine whether a hand is visible once the target is already large enough in the image
+
+## Long-range acquisition
+Handled by:
+- `pink_balloon_detector`
+
+Purpose:
+- provide a larger, simpler, more visible cue for long-range visual acquisition
+
+This reflects what the experiments showed:
+- the hand is too small and variable to be the only long-range cue
+- the balloon is visually simpler and larger
+- at 20 ft, color-blob evidence is more reliable than perfect geometric shape
+
+---
+
+# 13. What Has Not Been Built Yet
 
 These are intentionally still pending:
-
 - hand landmark visualization/debug overlay
 - gesture classification
 - command gating
@@ -956,31 +1154,30 @@ These are intentionally still pending:
 - landing logic
 - final integrated Tello interface architecture
 
-That is correct and expected. The current focus has been on building a clean, verified foundation.
+That is correct and expected. The current focus has been on building a clean, verified foundation and a viable long-range cue strategy.
 
 ---
 
-# 13. Recommended Next Stage
+# 14. Recommended Next Stage
 
 The next clean step is:
 
-## `hand_debug_viewer.py`
+## visual debug and integration refinement
 
-This should:
-- subscribe to `/tello/image_raw`
-- run the same MediaPipe hand detection
-- draw hand landmarks on the image
-- display the result in a window
-- help visually assess whether landmark quality is stable enough for gesture recognition
+Specifically:
+- add a better debug viewer for the current balloon detector
+- verify blob stability at representative long-range conditions
+- then begin integrating cue acquisition logic with later-stage supervision
 
-This is the best next move because gesture classification should not be attempted blind.
+A strong immediate follow-up would be:
+- a balloon debug viewer / diagnostics node
+- or direct integration of the balloon detector into the future supervisor logic
 
 ---
 
-# 14. Final Summary
+# 15. Final Summary
 
 At the current stage, the project has successfully built and validated:
-
 - ROS 2 package structure
 - virtual environment workflow
 - environment-aware ROS launcher configuration
@@ -990,6 +1187,18 @@ At the current stage, the project has successfully built and validated:
 - ROS image publishing
 - ROS image subscribing
 - live MediaPipe hand detection from the Tello image stream
+- a workable long-range cue-detection pipeline
 - resolution of the major environment and compatibility issues encountered so far
 
-This is the correct foundation for the next phase of the project: **gesture perception**, then **state supervision**, then **control**.
+It also moved past several failed or suboptimal cue strategies:
+- hand-only long-range acquisition
+- green cue direction
+- orange balloon direction
+- circularity-prioritized balloon detection under glare
+
+The current chosen direction is:
+- hand detection for closer-range perception
+- pink balloon detection for long-range cueing
+- pixel-count-prioritized cue logic instead of circularity-first logic
+
+That is the correct current foundation for the next phase of the project: integrating perception outputs into a higher-level decision and control pipeline.
