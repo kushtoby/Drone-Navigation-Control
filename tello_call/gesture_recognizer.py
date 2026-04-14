@@ -14,25 +14,31 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Int32, String
 
 try:
+    from ai_edge_litert.interpreter import Interpreter as LiteRTInterpreter  # type: ignore
+except Exception:  # pragma: no cover
+    LiteRTInterpreter = None
+
+try:
+    from tflite_runtime.interpreter import Interpreter as TFLiteRuntimeInterpreter  # type: ignore
+except Exception:  # pragma: no cover
+    TFLiteRuntimeInterpreter = None
+
+try:
     from tensorflow import lite as tflite  # type: ignore
 except Exception:  # pragma: no cover
     tflite = None
-    try:
-        from tflite_runtime.interpreter import Interpreter  # type: ignore
-    except Exception:
-        Interpreter = None
-else:
-    Interpreter = None
 
 
 class LiteKeyPointClassifier:
     def __init__(self, model_path: str, num_threads: int = 1) -> None:
-        if tflite is not None:
+        if LiteRTInterpreter is not None:
+            self.interpreter = LiteRTInterpreter(model_path=model_path)
+        elif TFLiteRuntimeInterpreter is not None:
+            self.interpreter = TFLiteRuntimeInterpreter(model_path=model_path, num_threads=num_threads)
+        elif tflite is not None:
             self.interpreter = tflite.Interpreter(model_path=model_path, num_threads=num_threads)
-        elif Interpreter is not None:
-            self.interpreter = Interpreter(model_path=model_path, num_threads=num_threads)
         else:
-            raise RuntimeError('No TFLite interpreter is available. Install tensorflow or tflite-runtime.')
+            raise RuntimeError('No LiteRT/TFLite interpreter is available. Install ai-edge-litert, tflite-runtime, or tensorflow.')
 
         self.interpreter.allocate_tensors()
         self.input_details = self.interpreter.get_input_details()
