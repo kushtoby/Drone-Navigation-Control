@@ -40,8 +40,9 @@ class MissionSupervisor(Node):
 
         self.declare_parameter('cue_detect_frames', 10)
         self.declare_parameter('cue_lost_frames', 10)
-        self.declare_parameter('gesture_switch_frames', 12)
-        self.declare_parameter('land_gesture_frames', 15)
+        self.declare_parameter('gesture_switch_frames', 2)
+        self.declare_parameter('gesture_switch_label', 'Stop')
+        self.declare_parameter('land_gesture_frames', 5)
         self.declare_parameter('land_gesture_label', 'Land')
 
         self.declare_parameter('yaw_deadband_px', 80)
@@ -60,6 +61,7 @@ class MissionSupervisor(Node):
         self.cue_detect_frames = int(self.get_parameter('cue_detect_frames').value)
         self.cue_lost_frames = int(self.get_parameter('cue_lost_frames').value)
         self.gesture_switch_frames = int(self.get_parameter('gesture_switch_frames').value)
+        self.gesture_switch_label = str(self.get_parameter('gesture_switch_label').value)
         self.land_gesture_frames = int(self.get_parameter('land_gesture_frames').value)
         self.land_gesture_label = str(self.get_parameter('land_gesture_label').value)
         self.yaw_deadband_px = int(self.get_parameter('yaw_deadband_px').value)
@@ -223,13 +225,8 @@ class MissionSupervisor(Node):
 
     def update_gesture_switch_counter(self) -> None:
         if self.gesture_valid and self.gesture_label:
-            if self.gesture_label == self.last_switch_label:
-                self.gesture_seen_count += 1
-            else:
-                self.last_switch_label = self.gesture_label
-                self.gesture_seen_count = 1
+            self.gesture_seen_count += 1
         else:
-            self.last_switch_label = ''
             self.gesture_seen_count = 0
 
     def update_land_counter(self) -> None:
@@ -306,7 +303,7 @@ class MissionSupervisor(Node):
                 self.state = MissionState.GESTURE_MODE
                 self.publish_zero_cmd()
                 self.get_logger().info(
-                    f'Gesture mode engaged by label "{self.last_switch_label}". Cue tracking is now disabled.'
+                    f'Gesture mode engaged by label "{self.gesture_switch_label}". Cue tracking is now disabled.'
                 )
                 return
 

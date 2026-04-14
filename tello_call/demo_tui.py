@@ -15,14 +15,14 @@ class DemoTUI(Node):
     def __init__(self) -> None:
         super().__init__('demo_tui')
         self.start_pub = self.create_publisher(Empty, '/tello/start_hover', 10)
-        self.emergency_pub = self.create_publisher(Empty, '/tello/emergency', 10)
+        self.land_pub = self.create_publisher(Empty, '/tello/land', 10)
         self.timer = self.create_timer(0.05, self.poll_keyboard)
 
         self.stdin_fd = sys.stdin.fileno()
         self.old_term = termios.tcgetattr(self.stdin_fd)
         tty.setcbreak(self.stdin_fd)
 
-        self.get_logger().info('demo_tui started. Keys: s=start hover, e=emergency, q=quit TUI.')
+        self.get_logger().info('demo_tui started. Keys: s=start hover, e=land, q=quit TUI.')
 
     def poll_keyboard(self) -> None:
         dr, _, _ = select.select([sys.stdin], [], [], 0.0)
@@ -33,8 +33,8 @@ class DemoTUI(Node):
             self.start_pub.publish(Empty())
             self.get_logger().info('Published /tello/start_hover')
         elif ch in ('e', 'E'):
-            self.emergency_pub.publish(Empty())
-            self.get_logger().warn('Published /tello/emergency')
+            self.land_pub.publish(Empty())
+            self.get_logger().warn('Published /tello/land')
         elif ch in ('q', 'Q'):
             self.get_logger().info('Quit requested. Stopping TUI node.')
             raise KeyboardInterrupt
