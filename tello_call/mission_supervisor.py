@@ -39,9 +39,9 @@ class MissionSupervisor(Node):
         self.declare_parameter('takeoff_settle_s', 2.5)
 
         self.declare_parameter('cue_detect_frames', 10)
-        self.declare_parameter('cue_lost_frames', 10)
+        self.declare_parameter('cue_lost_frames', 30)
         self.declare_parameter('gesture_switch_frames', 2)
-        self.declare_parameter('gesture_switch_label', 'Stop')
+        self.declare_parameter('gesture_switch_label', 'ANY_VALID_GESTURE')
         self.declare_parameter('land_gesture_frames', 5)
         self.declare_parameter('land_gesture_label', 'Land')
 
@@ -108,12 +108,12 @@ class MissionSupervisor(Node):
         self.cue_lost_count = 0
         self.gesture_seen_count = 0
         self.land_seen_count = 0
-        self.last_switch_label = ''
         self.takeoff_started_at = 0.0
         self.takeoff_sent = False
         self.reported_low_battery = False
         self.gesture_mode_locked = False
         self.last_link_warn_time = 0.0
+        self.handoff_armed = False
 
         self.timer = self.create_timer(0.05, self.step)
         self.get_logger().info('mission_supervisor started.')
@@ -132,6 +132,7 @@ class MissionSupervisor(Node):
             self.gesture_seen_count = 0
             self.land_seen_count = 0
             self.gesture_mode_locked = False
+            self.handoff_armed = False
             self.get_logger().info('Start-hover received. Entering TAKEOFF_HOVER.')
 
     def emergency_callback(self, _: Empty) -> None:
@@ -224,7 +225,7 @@ class MissionSupervisor(Node):
             self.cue_seen_count = 0
 
     def update_gesture_switch_counter(self) -> None:
-        if self.gesture_valid and self.gesture_label:
+        if self.handoff_armed and self.gesture_valid and self.gesture_label:
             self.gesture_seen_count += 1
         else:
             self.gesture_seen_count = 0
@@ -234,6 +235,14 @@ class MissionSupervisor(Node):
             self.land_seen_count += 1
         else:
             self.land_seen_count = 0
+
+    def enter_gesture_mode(self, reason: str) -> None:
+        self.gesture_mode_locked = True
+        self.state = MissionState.GESTURE_MODE
+        self.publish_zero_cmd()
+        self.gesture_seen_count = 0
+        self.land_seen_count = 0
+        self.get_logger().info(f'Gesture mode engaged: {reason}')
 
     def gesture_to_cmd(self, label: str) -> Twist:
         cmd = Twist()
@@ -289,9 +298,18 @@ class MissionSupervisor(Node):
             self.publish_zero_cmd()
             self.update_cue_counters()
             self.update_gesture_switch_counter()
+
             if self.cue_seen_count >= self.cue_detect_frames:
+                self.handoff_armed = True
+                self.gesture_seen_count = 0
                 self.state = MissionState.CUE_APPROACH
                 self.get_logger().info('Cue confirmed. Entering CUE_APPROACH.')
+                return
+
+            if self.handoff_armed and self.gesture_seen_count >= self.gesture_switch_frames:
+                self.enter_gesture_mode('from WAIT_FOR_CUE after cue was previously acquired')
+                return
+
             return
 
         if self.state == MissionState.CUE_APPROACH:
@@ -299,18 +317,13 @@ class MissionSupervisor(Node):
             self.update_gesture_switch_counter()
 
             if self.gesture_seen_count >= self.gesture_switch_frames:
-                self.gesture_mode_locked = True
-                self.state = MissionState.GESTURE_MODE
-                self.publish_zero_cmd()
-                self.get_logger().info(
-                    f'Gesture mode engaged by label "{self.gesture_switch_label}". Cue tracking is now disabled.'
-                )
+                self.enter_gesture_mode('from CUE_APPROACH')
                 return
 
             if self.cue_lost_count >= self.cue_lost_frames:
                 self.publish_zero_cmd()
                 self.state = MissionState.WAIT_FOR_CUE
-                self.get_logger().info('Cue lost. Returning to WAIT_FOR_CUE.')
+                self.get_logger().info('Cue lost. Returning to WAIT_FOR_CUE, handoff remains armed.')
                 return
 
             if not self.cue.detected:
@@ -366,4 +379,5 @@ def main(args=None) -> None:
         node.get_logger().info('Shutting down mission_supervisor.')
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()

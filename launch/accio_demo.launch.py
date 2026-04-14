@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 from launch import LaunchDescription
 from launch_ros.actions import Node
 
@@ -50,9 +51,9 @@ def generate_launch_description() -> LaunchDescription:
             parameters=[{
                 'hover_height_m': 0.91,
                 'cue_detect_frames': 10,
-                'cue_lost_frames': 10,
-                'gesture_switch_frames': 12,
-                'land_gesture_frames': 15,
+                'cue_lost_frames': 30,
+                'gesture_switch_frames': 2,
+                'land_gesture_frames': 5,
                 'land_gesture_label': 'Land',
                 'yaw_deadband_px': 80,
                 'yaw_kp': 0.10,
@@ -63,11 +64,5 @@ def generate_launch_description() -> LaunchDescription:
                 'climb_cmd': 18.0,
                 'gesture_cmd_mag': 20.0,
             }],
-        ),
-        Node(
-            package='tello_call',
-            executable='demo_tui',
-            name='demo_tui',
-            output='screen',
         ),
     ])

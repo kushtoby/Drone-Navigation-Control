@@ -22,20 +22,20 @@ Since the full package files will be uploaded separately, this document does not
 - how those failures were resolved
 - which approaches were tried and later abandoned
 
-At the current stage, the project still does not yet implement:
+At the current stage, the project now includes the integrated demo path:
 - gesture recognition
-- supervisor logic
-- motion commands
+- supervisor / state-machine logic
+- motion command publishing
 - landing logic
-- the final integrated multi-node drone interface
+- a single-owner integrated Tello runtime for the full demo
 
-What has been completed is the ROS 2, Tello communication, image transport, first perception baseline, and the first long-range cue-detection baseline needed before control can be added.
+The earlier telemetry, frame-health, image transport, hand-detection, and cue-detection stages are still documented here because they were the foundation used to reach the current integrated system.
 
 ---
 
 # 1. Current Project Scope
 
-The current system has successfully validated six major stages:
+The current system has successfully validated eight major stages:
 
 1. **Telemetry stage**
    - Tello connection
@@ -69,6 +69,19 @@ The current system has successfully validated six major stages:
    - final shift to pink balloon detection
    - final shift from circularity-prioritized logic to pixel-count-prioritized logic
 
+7. **Gesture-classification stage**
+   - MediaPipe Hands plus a TFLite/LiteRT classifier on `/tello/image_raw`
+   - gesture-valid publishing
+   - gesture-label publishing
+
+8. **Integrated demo stage**
+   - single-owner `tello_runtime`
+   - `mission_supervisor` state machine
+   - pink-balloon following
+   - gesture-mode transition
+   - gesture-driven motion commands
+   - gentle landing through gesture or TUI land command
+
 This means the project has already proven:
 - ROS 2 package execution works
 - Python environment management works
@@ -78,15 +91,38 @@ This means the project has already proven:
 - the Tello video stream can be received
 - ROS image transport can be used successfully
 - MediaPipe can process the live Tello image feed
-- live hand detection from the Tello camera works through ROS 2
+- live hand detection and gesture classification from the Tello camera work through ROS 2
 - a long-range colored cue can be detected from the Tello feed
 - cue-detection logic can be adapted when lighting and glare break shape assumptions
+- an integrated supervisor/runtime path can command takeoff, cue following, gesture control, and landing
 
 ---
 
 # 2. Current Architecture
 
-At this point the system is still being tested in isolated layers rather than as one final integrated runtime.
+At this point the project has both an integrated demo runtime and the earlier standalone validation nodes documented below.
+
+## Integrated demo path
+
+```text
+Tello drone
+   ↓
+tello_runtime
+   ↓
+/tello/image_raw
+   ↓
++--------------------------+---------------------------+
+|                          |                           |
+pink_balloon_detector      gesture_recognizer         mission_supervisor
+|                          |                           |
+/tello/pink_balloon_*      /tello/gesture_*           /tello/takeoff
+                                                    /tello/land
+                                                    /tello/cmd_vel
+                                                        ↓
+                                                   tello_runtime
+```
+
+The demo is intended to run with one hardware owner (`tello_runtime`) plus separate perception and supervision nodes. The older nodes documented below remain useful for isolated testing.
 
 ## Telemetry path
 
@@ -157,13 +193,11 @@ pink_balloon_detector
 
 ## Important architectural note
 
-At the current stage, these nodes are validated independently.
+The older validation nodes are still useful for isolated testing.
 
 That is intentional.
 
-Each node that owns the drone-side connection currently creates its own `Tello()` object. That is acceptable for stage-by-stage testing, but it is not the final architecture for the full project.
-
-The final integrated system will eventually need a cleaner hardware interface design so multiple high-level nodes are not all trying to own the drone connection separately.
+However, the current full-demo direction is no longer to let multiple nodes own the drone connection. The integrated demo is built around `tello_runtime` as the single hardware owner, with the higher-level nodes communicating through ROS topics. Standalone connection-owning nodes such as `tello_adapter`, `tello_camera`, and `tello_image_publisher` should be treated as development / validation tools rather than the final demo architecture.
 
 ---
 
@@ -192,9 +226,76 @@ The final integrated system will eventually need a cleaner hardware interface de
 - `/tello/pink_balloon_center_y` → `std_msgs/Int32`
 - `/tello/pink_balloon_area` → `std_msgs/Int32`
 
+## Gesture topics
+- `/tello/gesture_valid` → `std_msgs/Bool`
+- `/tello/gesture_label` → `std_msgs/String`
+- `/tello/gesture_id` → `std_msgs/Int32`
+- `/tello/gesture_debug` → `sensor_msgs/Image`
+
+## Integrated supervisor / runtime topics
+- `/tello/takeoff` → `std_msgs/Empty`
+- `/tello/land` → `std_msgs/Empty`
+- `/tello/emergency` → `std_msgs/Empty`
+- `/tello/cmd_vel` → `geometry_msgs/Twist`
+- `/tello/tof_cm` → `std_msgs/Int32`
+- `/tello/state` → `std_msgs/String`
+- `/tello/mode` → `std_msgs/String`
+
 ---
 
 # 4. Current Nodes and Their Roles
+
+## `tello_runtime`
+Responsible for:
+- creating the single-owner Tello interface used by the full demo
+- receiving `/tello/cmd_vel`, `/tello/takeoff`, `/tello/land`, and `/tello/emergency`
+- publishing `/tello/image_raw`, `/tello/frame_alive`, `/tello/link_ok`, `/tello/battery`, and `/tello/tof_cm`
+
+Why it exists:
+- the final integrated demo should not have multiple high-level nodes trying to own the drone connection simultaneously
+
+---
+
+## `gesture_recognizer`
+Responsible for:
+- subscribing to `/tello/image_raw`
+- running MediaPipe Hands
+- classifying gestures with the keypoint classifier model
+- publishing:
+  - `/tello/gesture_valid`
+  - `/tello/gesture_label`
+  - `/tello/gesture_id`
+  - `/tello/gesture_debug` when enabled
+
+Why it exists:
+- this is the current close-range command perception node for the integrated demo
+
+---
+
+## `mission_supervisor`
+Responsible for:
+- managing the high-level state machine
+- commanding takeoff and hover
+- waiting for cue acquisition
+- cue-following using pink-balloon topics
+- switching to gesture mode after cue acquisition
+- sending gesture-derived motion commands
+- commanding landing
+
+Why it exists:
+- this is the node that decides when to trust cue tracking, when to trust gesture commands, and when to land
+
+---
+
+## `demo_tui`
+Responsible for:
+- publishing `/tello/start_hover`
+- publishing `/tello/land` from the keyboard
+
+Why it exists:
+- this provides a simple intentional trigger and safe keyboard landing path for demo operation
+
+---
 
 ## `tello_adapter`
 Responsible for:
@@ -282,9 +383,19 @@ Why it exists:
 ~/ros2_ws
 ```
 
+## Repository root
+```text
+~/ros2_ws/src/Drone-Navigation-Control
+```
+
 ## Package root
 ```text
-~/ros2_ws/src/tello_call
+~/ros2_ws/src/Drone-Navigation-Control
+```
+
+## Python package directory
+```text
+~/ros2_ws/src/Drone-Navigation-Control/tello_call
 ```
 
 ## Python virtual environment
@@ -310,8 +421,9 @@ At the current stage, the following environment state is known to work:
 - `mediapipe==0.10.21`
 - `mediapipe.solutions` available
 - `djitellopy` import working
+- `ai_edge_litert` import working
 
-This matters because there were multiple compatibility issues during setup.
+This matters because there were multiple compatibility issues during setup, especially around interpreter selection and the gesture-classifier runtime.
 
 ---
 
@@ -406,16 +518,18 @@ This ensures `ros2 run` uses the environment Python rather than the system Pytho
 
 `setup.py` must register the node entry points in `console_scripts`.
 
-At the current stage, the package should register:
+At the current stage, `setup.py` should register the current console scripts, including at least:
 
-- `tello_adapter`
-- `tello_camera`
-- `tello_image_publisher`
-- `image_listener`
-- `hand_detector`
+- `tello_runtime`
+- `gesture_recognizer`
+- `mission_supervisor`
+- `demo_tui`
 - `pink_balloon_detector`
+- `status_monitor`
+- `status_source`
+- plus the earlier standalone validation nodes such as `tello_adapter`, `tello_camera`, `tello_image_publisher`, `image_listener`, `hand_detector`, and `hand_debug_viewer`
 
-Since the full package files will be uploaded separately, keep `setup.py` synchronized with the scripts included in the package.
+It should also include the model files under `tello_call/model/keypoint_classifier/`. Keep `setup.py` synchronized with the scripts and package data included in the repository.
 
 ---
 
@@ -427,14 +541,22 @@ Place the node files inside:
 ~/ros2_ws/src/tello_call/tello_call/
 ```
 
-At the current stage, the relevant node files are:
+At the current stage, the relevant node files include:
 
-- `tello_adapter.py`
-- `tello_camera.py`
-- `tello_image_publisher.py`
-- `image_listener.py`
-- `hand_detector.py`
+- `tello_runtime.py`
+- `gesture_recognizer.py`
+- `mission_supervisor.py`
+- `demo_tui.py`
 - `pink_balloon_detector.py`
+- `status_monitor.py`
+- `status_source.py`
+- and the earlier standalone validation nodes:
+  - `tello_adapter.py`
+  - `tello_camera.py`
+  - `tello_image_publisher.py`
+  - `image_listener.py`
+  - `hand_detector.py`
+  - `hand_debug_viewer.py`
 
 Note: earlier experimental cue-detector files for green and orange were removed once they were no longer the chosen direction.
 
@@ -462,7 +584,7 @@ This is the clean rebuild sequence used throughout development.
 Check one of the installed launchers:
 
 ```bash
-head -n 1 ~/ros2_ws/install/tello_call/lib/tello_call/tello_adapter
+head -n 1 ~/ros2_ws/install/tello_call/lib/tello_call/tello_runtime
 ```
 
 The correct result is:
@@ -477,7 +599,15 @@ If it instead shows:
 #!/usr/bin/python3
 ```
 
-then ROS 2 is still using the system interpreter, which will cause environment-specific imports such as `djitellopy` to fail.
+then ROS 2 is still using the system interpreter, which will cause environment-specific imports such as `djitellopy` and `mediapipe` to fail.
+
+If a clean rebuild regenerates the wrong shebangs, patch them after the final build:
+
+```bash
+find ~/ros2_ws/install/tello_call/lib/tello_call -maxdepth 1 -type f -exec \
+  sed -i '1 s|^#!.*python3$|#!/usr/bin/env python3|' {} \
+;
+```
 
 ---
 
@@ -762,6 +892,117 @@ Expected result:
 - at long range the balloon may appear mainly as a color blob rather than a perfect geometric object
 - detection should still succeed if enough target-color pixels are present over multiple frames
 - center and approximate blob area should still be published when detection is confirmed
+
+---
+
+## G. Current integrated demo — launch-file path
+
+Use the launch file for the non-interactive stack, and run the TUI separately.
+
+Terminal 1:
+
+```bash
+source ~/use_tello_env.sh
+ros2 launch tello_call accio_demo.launch.py
+```
+
+Terminal 2:
+
+```bash
+source ~/use_tello_env.sh
+ros2 run tello_call demo_tui
+```
+
+Expected result:
+- launch starts `tello_runtime`, `pink_balloon_detector`, `gesture_recognizer`, and `mission_supervisor`
+- TUI starts separately and reports the keys `s=start hover, e=land, q=quit TUI`
+
+---
+
+## H. Current integrated demo — without the launch file
+
+Run each node manually in separate terminals.
+
+Terminal 1:
+
+```bash
+source ~/use_tello_env.sh
+ros2 run tello_call tello_runtime
+```
+
+Terminal 2:
+
+```bash
+source ~/use_tello_env.sh
+ros2 run tello_call pink_balloon_detector
+```
+
+Terminal 3:
+
+```bash
+source ~/use_tello_env.sh
+ros2 run tello_call gesture_recognizer
+```
+
+Terminal 4:
+
+```bash
+source ~/use_tello_env.sh
+ros2 run tello_call mission_supervisor
+```
+
+Terminal 5:
+
+```bash
+source ~/use_tello_env.sh
+ros2 run tello_call demo_tui
+```
+
+---
+
+## I. Listening to topics during the demo
+
+These topic commands are useful while testing either the launch-file path or the manual path.
+
+```bash
+source ~/use_tello_env.sh
+ros2 topic echo /tello/state
+```
+
+```bash
+source ~/use_tello_env.sh
+ros2 topic echo /tello/mode
+```
+
+```bash
+source ~/use_tello_env.sh
+ros2 topic echo /tello/gesture_label
+```
+
+```bash
+source ~/use_tello_env.sh
+ros2 topic echo /tello/gesture_valid
+```
+
+```bash
+source ~/use_tello_env.sh
+ros2 topic echo /tello/pink_balloon_detected
+```
+
+```bash
+source ~/use_tello_env.sh
+ros2 topic echo /tello/cmd_vel
+```
+
+```bash
+source ~/use_tello_env.sh
+ros2 topic echo /tello/battery
+```
+
+```bash
+source ~/use_tello_env.sh
+ros2 topic echo /tello/tof_cm
+```
 
 ---
 
@@ -1087,6 +1328,64 @@ At long range, reliable blob evidence can matter more than perfect geometry.
 
 ---
 
+## Challenge 14 — launcher shebangs reverted after clean rebuilds
+
+### Symptom
+After a clean rebuild, previously working nodes suddenly failed with import errors such as:
+
+```text
+ModuleNotFoundError: No module named 'djitellopy'
+```
+
+or
+
+```text
+ModuleNotFoundError: No module named 'mediapipe'
+```
+
+### Diagnosis
+The rebuild regenerated the installed ROS launcher wrappers with the wrong interpreter shebang. Even when the virtual environment itself was correct, `ros2 run` would fall back to system Python if the wrapper started with `#!/usr/bin/python3`.
+
+### Resolution
+Keep `setup.cfg` configured for `/usr/bin/env python3`, verify the installed launchers after rebuilds, and patch the installed wrappers after the final build if needed.
+
+### Practical lesson
+After any rebuild, verify the installed wrapper interpreter before assuming the Python environment itself is broken.
+
+---
+
+## Challenge 15 — gesture classifier runtime conflicts
+
+### Symptom
+The gesture pipeline reached a point where MediaPipe and the classifier model were both needed, but TensorFlow-based TFLite and MediaPipe dependency constraints conflicted inside the same environment.
+
+### Diagnosis
+The issue was not the gesture model itself. The real problem was keeping MediaPipe, protobuf compatibility, and a working TFLite/LiteRT interpreter in the same environment.
+
+### Resolution
+The current working path uses `mediapipe==0.10.21` with a LiteRT/TFLite-compatible classifier path in `gesture_recognizer.py`, rather than relying on the earlier broken TensorFlow-only setup.
+
+### Practical lesson
+When gesture classification depends on both perception and model-runtime dependencies, treat the runtime stack as part of the system design, not as a late install detail.
+
+---
+
+## Challenge 16 — full demo handoff logic needed to be more robust than a short timing window
+
+### Symptom
+Gesture labels could be publishing correctly, but the drone would still fail to move during the full demo if the supervisor never transitioned into `GESTURE_MODE`.
+
+### Diagnosis
+The integrated problem was not just recognition accuracy. The state machine and launch-time parameter overrides also controlled whether the supervisor would trust and apply gesture commands at all.
+
+### Resolution
+The current demo path uses the updated `mission_supervisor` and launch behavior developed during integration testing, with `demo_tui` run separately and the supervisor handling cue-following, gesture-mode switching, and landing in the full stack.
+
+### Practical lesson
+For the final demo, it is not enough for `/tello/gesture_label` to look correct. The state machine has to actually be in the mode that consumes those labels for motion.
+
+---
+
 # 11. Why the Project Was Built in This Order
 
 This order was deliberate.
@@ -1143,18 +1442,15 @@ This reflects what the experiments showed:
 
 ---
 
-# 13. What Has Not Been Built Yet
+# 13. What Still Needs Improvement
 
-These are intentionally still pending:
-- hand landmark visualization/debug overlay
-- gesture classification
-- command gating
-- supervisor/state machine
-- motion logic
-- landing logic
-- final integrated Tello interface architecture
+The project now has a working integrated demo path, but several things still need refinement:
+- cue-following reliability under real demo lighting and glare
+- gesture-to-motion reliability and handoff tuning in the full demo
+- launch and rebuild robustness across repeated test cycles
+- continued safety tuning for flight and landing behavior
 
-That is correct and expected. The current focus has been on building a clean, verified foundation and a viable long-range cue strategy.
+The core integrated architecture now exists; the remaining work is mostly around reliability, tuning, and repeatability.
 
 ---
 
@@ -1162,16 +1458,13 @@ That is correct and expected. The current focus has been on building a clean, ve
 
 The next clean step is:
 
-## visual debug and integration refinement
+## integrated demo reliability refinement
 
 Specifically:
-- add a better debug viewer for the current balloon detector
-- verify blob stability at representative long-range conditions
-- then begin integrating cue acquisition logic with later-stage supervision
-
-A strong immediate follow-up would be:
-- a balloon debug viewer / diagnostics node
-- or direct integration of the balloon detector into the future supervisor logic
+- verify repeatable balloon-to-gesture handoff behavior during full runs
+- verify safe landing behavior from both the `Land` gesture and the TUI land command
+- tighten launch / rebuild workflow documentation so demo-day operation is repeatable
+- continue tuning cue detector and supervisor thresholds under representative lab conditions
 
 ---
 
@@ -1188,6 +1481,10 @@ At the current stage, the project has successfully built and validated:
 - ROS image subscribing
 - live MediaPipe hand detection from the Tello image stream
 - a workable long-range cue-detection pipeline
+- gesture classification from the Tello image stream
+- a single-owner integrated runtime (`tello_runtime`)
+- a full-demo supervisor path (`mission_supervisor`)
+- a current demo launch path plus a fully manual multi-terminal path
 - resolution of the major environment and compatibility issues encountered so far
 
 It also moved past several failed or suboptimal cue strategies:
@@ -1195,10 +1492,12 @@ It also moved past several failed or suboptimal cue strategies:
 - green cue direction
 - orange balloon direction
 - circularity-prioritized balloon detection under glare
+- earlier broken gesture-runtime combinations that did not coexist cleanly with MediaPipe
 
 The current chosen direction is:
-- hand detection for closer-range perception
 - pink balloon detection for long-range cueing
-- pixel-count-prioritized cue logic instead of circularity-first logic
+- gesture recognition for close-range command control
+- `mission_supervisor` for the high-level state machine
+- `tello_runtime` as the single hardware owner during the full demo
 
-That is the correct current foundation for the next phase of the project: integrating perception outputs into a higher-level decision and control pipeline.
+That is the correct current foundation for the next phase of the project: improving reliability and repeatability of the integrated demo.
