@@ -1,8 +1,6 @@
 from setuptools import find_packages, setup
 
-
 package_name = 'tello_call'
-
 
 setup(
     name=package_name,
@@ -47,6 +45,7 @@ setup(
             'gesture_recognizer = tello_call.gesture_recognizer:main',
             'mission_supervisor = tello_call.mission_supervisor:main',
             'demo_tui = tello_call.demo_tui:main',
+            'forensic_tracker = tello_call.forensic_tracker:main',
         ],
     },
 )
