@@ -23,30 +23,57 @@ class PinkBalloonDetector(Node):
         self.cy_pub = self.create_publisher(Int32, '/tello/pink_balloon_center_y', 10)
         self.area_pub = self.create_publisher(Int32, '/tello/pink_balloon_area', 10)
 
+        self.blob_count_pub = self.create_publisher(Int32, '/tello/pink_balloon_blob_count', 10)
+        self.mode_code_pub = self.create_publisher(Int32, '/tello/pink_balloon_mode_code', 10)
+
         self.create_subscription(Image, '/tello/image_raw', self.image_callback, 10)
 
         self.declare_parameter('show_debug', True)
         self.declare_parameter('pink_hsv_lower', [140, 80, 80])
         self.declare_parameter('pink_hsv_upper', [179, 255, 255])
+
+        # Main detection is pixel-count based
         self.declare_parameter('min_pixel_count', 320)
+
+        # Per-blob validity filters
         self.declare_parameter('min_blob_area', 120)
+        self.declare_parameter('min_blob_pixels', 180)
+        self.declare_parameter('min_blob_w', 12)
+        self.declare_parameter('min_blob_h', 12)
+
         self.declare_parameter('roi_top_frac', 0.0)
         self.declare_parameter('roi_bottom_frac', 0.9)
+
+        # Boolean detection debounce
         self.declare_parameter('history_len', 5)
         self.declare_parameter('required_hits', 3)
+
+        # Blob-count debounce
+        self.declare_parameter('blob_history_len', 5)
+        self.declare_parameter('required_blob_count_hits', 3)
 
         self.window_name = 'Pink Balloon Detector'
         self.show_debug = bool(self.get_parameter('show_debug').value)
 
         self.lower_pink = np.array(self.get_parameter('pink_hsv_lower').value, dtype=np.uint8)
         self.upper_pink = np.array(self.get_parameter('pink_hsv_upper').value, dtype=np.uint8)
+
         self.min_pixel_count = int(self.get_parameter('min_pixel_count').value)
         self.min_blob_area = int(self.get_parameter('min_blob_area').value)
+        self.min_blob_pixels = int(self.get_parameter('min_blob_pixels').value)
+        self.min_blob_w = int(self.get_parameter('min_blob_w').value)
+        self.min_blob_h = int(self.get_parameter('min_blob_h').value)
+
         self.roi_top_frac = float(self.get_parameter('roi_top_frac').value)
         self.roi_bottom_frac = float(self.get_parameter('roi_bottom_frac').value)
+
         history_len = max(1, int(self.get_parameter('history_len').value))
         self.required_hits = int(self.get_parameter('required_hits').value)
         self.history = deque(maxlen=history_len)
+
+        blob_history_len = max(1, int(self.get_parameter('blob_history_len').value))
+        self.required_blob_count_hits = int(self.get_parameter('required_blob_count_hits').value)
+        self.blob_count_history = deque(maxlen=blob_history_len)
 
         self.get_logger().info('Pink balloon detector started.')
 
@@ -55,6 +82,8 @@ class PinkBalloonDetector(Node):
         cx_msg = Int32()
         cy_msg = Int32()
         area_msg = Int32()
+        blob_count_msg = Int32()
+        mode_code_msg = Int32()
 
         try:
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
@@ -85,14 +114,25 @@ class PinkBalloonDetector(Node):
             img_cx = w_img // 2
             img_cy = h_img // 2
 
+            valid_blobs = []
+
             for cnt in contours:
                 area = cv2.contourArea(cnt)
                 if area < self.min_blob_area:
                     continue
 
                 x, y, w, h = cv2.boundingRect(cnt)
-                if w < 12 or h < 12:
+                if w < self.min_blob_w or h < self.min_blob_h:
                     continue
+
+                single_blob_mask = np.zeros_like(mask)
+                cv2.drawContours(single_blob_mask, [cnt], -1, 255, thickness=cv2.FILLED)
+                blob_pixels = int(cv2.countNonZero(single_blob_mask))
+
+                if blob_pixels < self.min_blob_pixels:
+                    continue
+
+                valid_blobs.append((cnt, int(area), x, y, w, h, blob_pixels))
 
                 full_x = x
                 full_y = y + y0
@@ -108,11 +148,33 @@ class PinkBalloonDetector(Node):
                     best_bbox = (full_x, full_y, w, h)
                     best_center = (cx, cy)
 
+            # Debounce boolean detection
             self.history.append(1 if raw_detected else 0)
             confirmed = sum(self.history) >= self.required_hits
 
+            # Debounce blob count
+            raw_blob_count = min(len(valid_blobs), 2)
+            self.blob_count_history.append(raw_blob_count)
+
+            stable_blob_count = 0
+            for candidate in [2, 1, 0]:
+                hits = sum(1 for v in self.blob_count_history if v == candidate)
+                if hits >= self.required_blob_count_hits:
+                    stable_blob_count = candidate
+                    break
+
             detected_msg.data = confirmed
             self.detected_pub.publish(detected_msg)
+
+            blob_count_msg.data = int(stable_blob_count)
+            self.blob_count_pub.publish(blob_count_msg)
+
+            # mode_code mirrors blob count for now:
+            # 0 = no valid cue
+            # 1 = single balloon region
+            # 2 = split balloon / two valid regions
+            mode_code_msg.data = int(stable_blob_count)
+            self.mode_code_pub.publish(mode_code_msg)
 
             if confirmed and best_bbox is not None and best_center is not None:
                 cx_msg.data = int(best_center[0])
@@ -125,7 +187,9 @@ class PinkBalloonDetector(Node):
 
                 self.get_logger().info(
                     f'Pink balloon detected: center=({cx_msg.data}, {cy_msg.data}), '
-                    f'blob_area={area_msg.data}, pixel_count={pixel_count}, history={list(self.history)}'
+                    f'blob_area={area_msg.data}, pixel_count={pixel_count}, '
+                    f'raw_blob_count={raw_blob_count}, stable_blob_count={stable_blob_count}, '
+                    f'det_hist={list(self.history)}, blob_hist={list(self.blob_count_history)}'
                 )
 
                 if self.show_debug:
@@ -134,32 +198,48 @@ class PinkBalloonDetector(Node):
                     cv2.circle(frame, best_center, 5, (0, 0, 255), -1)
                     cv2.putText(
                         frame,
-                        f'DET pixels={pixel_count} area={best_area}',
+                        f'DET pixels={pixel_count} area={best_area} blobs={stable_blob_count}',
                         (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.75,
+                        0.7,
                         (0, 255, 0),
                         2,
                         cv2.LINE_AA,
                     )
             else:
                 self.get_logger().info(
-                    f'Pink balloon not confirmed. pixel_count={pixel_count}, history={list(self.history)}'
+                    f'Pink balloon not confirmed. pixel_count={pixel_count}, '
+                    f'raw_blob_count={raw_blob_count}, stable_blob_count={stable_blob_count}, '
+                    f'det_hist={list(self.history)}, blob_hist={list(self.blob_count_history)}'
                 )
 
                 if self.show_debug:
                     cv2.putText(
                         frame,
-                        f'NOT DETECTED pixels={pixel_count} hist={list(self.history)}',
+                        f'NOT DET pixels={pixel_count} blobs={stable_blob_count}',
                         (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.75,
+                        0.7,
                         (0, 0, 255),
                         2,
                         cv2.LINE_AA,
                     )
 
             if self.show_debug:
+                # draw all valid blobs in yellow
+                for _, area, x, y, w, h, blob_pixels in valid_blobs:
+                    cv2.rectangle(frame, (x, y + y0), (x + w, y + y0 + h), (0, 255, 255), 1)
+                    cv2.putText(
+                        frame,
+                        f'a={area} p={blob_pixels}',
+                        (x, max(15, y + y0 - 5)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.4,
+                        (0, 255, 255),
+                        1,
+                        cv2.LINE_AA,
+                    )
+
                 cv2.line(frame, (0, y1), (w_img, y1), (255, 0, 0), 2)
                 cv2.imshow(self.window_name, frame)
                 cv2.imshow('Pink Mask', mask)
@@ -173,6 +253,13 @@ class PinkBalloonDetector(Node):
         except Exception as exc:
             detected_msg.data = False
             self.detected_pub.publish(detected_msg)
+
+            blob_count_msg.data = 0
+            self.blob_count_pub.publish(blob_count_msg)
+
+            mode_code_msg.data = 0
+            self.mode_code_pub.publish(mode_code_msg)
+
             self.get_logger().error(f'Pink balloon detection failed: {exc}')
 
     def destroy_node(self) -> None:

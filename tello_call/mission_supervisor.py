@@ -90,7 +90,9 @@ class MissionSupervisor(Node):
         self.create_subscription(Int32, '/tello/battery', self.battery_callback, 10)
         self.create_subscription(Bool, '/tello/link_ok', self.link_ok_callback, 10)
         self.create_subscription(Image, '/tello/image_raw', self.image_info_callback, 10)
-
+        self.create_subscription(Int32, '/tello/pink_balloon_blob_count', self.pink_blob_count_callback, 10)
+        self.create_subscription(Int32, '/tello/pink_balloon_mode_code', self.pink_mode_code_callback, 10)
+        
         self.state = MissionState.IDLE
         self.cue = CueObservation()
         self.gesture_valid = False
@@ -110,6 +112,13 @@ class MissionSupervisor(Node):
         self.candidate_gesture_label = ''
         self.candidate_gesture_count = 0
         self.gesture_mismatch_count = 0
+
+        self.pink_blob_count = 0
+        self.pink_mode_code = 0
+        self.two_blob_seen_count = 0
+
+        self.declare_parameter('blob_switch_frames', 20)
+        self.blob_switch_frames = int(self.get_parameter('blob_switch_frames').value)
 
         self.timer = self.create_timer(0.05, self.step)
         self.get_logger().info('mission_supervisor started.')
@@ -133,6 +142,12 @@ class MissionSupervisor(Node):
         self.candidate_gesture_label = ''
         self.candidate_gesture_count = 0
         self.gesture_mismatch_count = 0
+
+    def update_two_blob_counter(self) -> None:
+        if self.pink_blob_count == 2:
+            self.two_blob_seen_count += 1
+        else:
+            self.two_blob_seen_count = 0
 
     def current_observed_gesture(self) -> str:
         return self.gesture_label if self.gesture_valid and self.gesture_label else ''
@@ -161,6 +176,7 @@ class MissionSupervisor(Node):
             self.takeoff_sent = False
             self.reported_low_battery = False
             self.reset_gesture_tracking()
+            self.two_blob_seen_count = 0
             self.publish_zero_cmd()
             self.transition_to(MissionState.TAKEOFF_HOVER, 'start_hover received')
 
@@ -201,6 +217,12 @@ class MissionSupervisor(Node):
     def image_info_callback(self, msg: Image) -> None:
         self.image_width = int(msg.width) if msg.width > 0 else self.image_width
         self.image_height = int(msg.height) if msg.height > 0 else self.image_height
+
+    def pink_blob_count_callback(self, msg: Int32) -> None:
+        self.pink_blob_count = int(msg.data)
+
+    def pink_mode_code_callback(self, msg: Int32) -> None:
+        self.pink_mode_code = int(msg.data)
 
     def publish_zero_cmd(self) -> None:
         self.cmd_pub.publish(Twist())
@@ -334,17 +356,41 @@ class MissionSupervisor(Node):
         if self.state == MissionState.FOLLOW_BALLOON:
             observed_gesture = self.current_observed_gesture()
             self.update_candidate_gesture(observed_gesture)
-            if self.candidate_gesture_confirmed():
-                confirmed_label = self.candidate_gesture_label
-                self.activate_gesture(confirmed_label)
-                self.transition_to(MissionState.GESTURE_MODE, f'gesture={confirmed_label} confirmed')
-                if confirmed_label == self.land_gesture_label:
+            self.update_two_blob_counter()
+
+            gesture_switch_ready = self.candidate_gesture_confirmed()
+            blob_switch_ready = self.two_blob_seen_count >= self.blob_switch_frames
+
+            self.get_logger().info(
+                f'FOLLOW_BALLOON: blob_count={self.pink_blob_count}, '
+                f'two_blob_seen_count={self.two_blob_seen_count}, '
+                f'gesture_valid={self.gesture_valid}, '
+                f'gesture_label="{self.gesture_label}", '
+                f'candidate="{self.candidate_gesture_label}", '
+                f'candidate_count={self.candidate_gesture_count}'
+            )
+
+            if gesture_switch_ready or blob_switch_ready:
+                if gesture_switch_ready:
+                    confirmed_label = self.candidate_gesture_label
+                    self.activate_gesture(confirmed_label)
+                    self.two_blob_seen_count = 0
+                    self.transition_to(MissionState.GESTURE_MODE, f'gesture={confirmed_label} confirmed')
+
+                    if confirmed_label == self.land_gesture_label:
+                        self.publish_zero_cmd()
+                        self.send_land()
+                        self.transition_to(MissionState.LANDING, 'land gesture confirmed')
+                    else:
+                        self.cmd_pub.publish(self.gesture_to_cmd(confirmed_label))
+                    return
+
+                if blob_switch_ready:
+                    self.reset_gesture_tracking()
+                    self.two_blob_seen_count = 0
+                    self.transition_to(MissionState.GESTURE_MODE, 'two-blob cue confirmed')
                     self.publish_zero_cmd()
-                    self.send_land()
-                    self.transition_to(MissionState.LANDING, 'land gesture confirmed')
-                else:
-                    self.cmd_pub.publish(self.gesture_to_cmd(confirmed_label))
-                return
+                    return
 
             if self.cue.detected:
                 self.cmd_pub.publish(self.compute_balloon_follow_cmd())
@@ -354,6 +400,15 @@ class MissionSupervisor(Node):
 
         if self.state == MissionState.GESTURE_MODE:
             observed_gesture = self.current_observed_gesture()
+            self.update_two_blob_counter()
+            blob_land_ready = self.two_blob_seen_count >= self.blob_switch_frames
+
+            if blob_land_ready:
+                self.publish_zero_cmd()
+                self.send_land()
+                self.two_blob_seen_count = 0
+                self.transition_to(MissionState.LANDING, 'two-blob cue confirmed in gesture mode')
+                return
 
             if self.active_gesture_label:
                 if observed_gesture == self.active_gesture_label:

@@ -68,6 +68,7 @@ The current system has successfully validated eight major stages:
    - orange balloon experiments
    - final shift to pink balloon detection
    - final shift from circularity-prioritized logic to pixel-count-prioritized logic
+   - addition of debounced blob-count logic for mode switching
 
 7. **Gesture-classification stage**
    - MediaPipe Hands plus a TFLite/LiteRT classifier on `/tello/image_raw`
@@ -78,9 +79,9 @@ The current system has successfully validated eight major stages:
    - single-owner `tello_runtime`
    - `mission_supervisor` state machine
    - pink-balloon following
-   - gesture-mode transition
+   - blob-count or gesture-based transition into gesture mode
    - gesture-driven motion commands
-   - gentle landing through gesture or TUI land command
+   - landing through either the `Land` gesture or the two-blob cue while already in gesture mode
 
 This means the project has already proven:
 - ROS 2 package execution works
@@ -189,6 +190,8 @@ pink_balloon_detector
 /tello/pink_balloon_center_x
 /tello/pink_balloon_center_y
 /tello/pink_balloon_area
+/tello/pink_balloon_blob_count
+/tello/pink_balloon_mode_code
 ```
 
 ## Important architectural note
@@ -225,6 +228,8 @@ However, the current full-demo direction is no longer to let multiple nodes own 
 - `/tello/pink_balloon_center_x` → `std_msgs/Int32`
 - `/tello/pink_balloon_center_y` → `std_msgs/Int32`
 - `/tello/pink_balloon_area` → `std_msgs/Int32`
+- `/tello/pink_balloon_blob_count` → `std_msgs/Int32`
+- `/tello/pink_balloon_mode_code` → `std_msgs/Int32`
 
 ## Gesture topics
 - `/tello/gesture_valid` → `std_msgs/Bool`
@@ -276,11 +281,14 @@ Why it exists:
 Responsible for:
 - managing the high-level state machine
 - commanding takeoff and hover
-- waiting for cue acquisition
-- cue-following using pink-balloon topics
-- switching to gesture mode after cue acquisition
-- sending gesture-derived motion commands
-- commanding landing
+- following the pink balloon in balloon mode
+- switching from balloon-following to gesture mode through either:
+  - confirmed gesture recognition, or
+  - confirmed two-blob pink-balloon cue
+- sending gesture-derived motion commands in gesture mode
+- commanding landing through either:
+  - the `Land` gesture, or
+  - the two-blob cue again while already in gesture mode
 
 Why it exists:
 - this is the node that decides when to trust cue tracking, when to trust gesture commands, and when to land
@@ -366,13 +374,18 @@ Responsible for:
 - cleaning the mask
 - using color-pixel count as the main trigger
 - selecting a reasonable blob to recover center and approximate blob area
-- publishing balloon detection state and location topics
+- counting valid pink regions after per-blob filtering
+- publishing:
+  - standard cue topics
+  - a debounced blob count
+  - a debounced mode-code mirror of that blob count
 
 Why it exists:
 - long-range detection at 20 ft is too weak for hand-only perception
 - the balloon provides a larger, simpler visual cue
 - glare and distance made circularity unreliable as the main criterion
 - pixel count proved more robust than perfect-shape assumptions
+- the split-balloon cue provides a more reliable mode-switch / land signal than depending on gestures alone
 
 ---
 
@@ -604,9 +617,7 @@ then ROS 2 is still using the system interpreter, which will cause environment-s
 If a clean rebuild regenerates the wrong shebangs, patch them after the final build:
 
 ```bash
-find ~/ros2_ws/install/tello_call/lib/tello_call -maxdepth 1 -type f -exec \
-  sed -i '1 s|^#!.*python3$|#!/usr/bin/env python3|' {} \
-;
+find ~/ros2_ws/install/tello_call/lib/tello_call -maxdepth 1 -type f -exec   sed -i '1 s|^#!.*python3$|#!/usr/bin/env python3|' {} ;
 ```
 
 ---
@@ -886,12 +897,17 @@ ros2 topic echo /tello/pink_balloon_detected --no-daemon
 ros2 topic echo /tello/pink_balloon_center_x --no-daemon
 ros2 topic echo /tello/pink_balloon_center_y --no-daemon
 ros2 topic echo /tello/pink_balloon_area --no-daemon
+ros2 topic echo /tello/pink_balloon_blob_count --no-daemon
 ```
 
 Expected result:
 - at long range the balloon may appear mainly as a color blob rather than a perfect geometric object
 - detection should still succeed if enough target-color pixels are present over multiple frames
 - center and approximate blob area should still be published when detection is confirmed
+- the blob count should be:
+  - `0` when no valid cue is present
+  - `1` when the balloon is intact
+  - `2` when the balloon is intentionally split into two valid pink regions
 
 ---
 
@@ -987,6 +1003,11 @@ ros2 topic echo /tello/gesture_valid
 ```bash
 source ~/use_tello_env.sh
 ros2 topic echo /tello/pink_balloon_detected
+```
+
+```bash
+source ~/use_tello_env.sh
+ros2 topic echo /tello/pink_balloon_blob_count
 ```
 
 ```bash
@@ -1386,6 +1407,29 @@ For the final demo, it is not enough for `/tello/gesture_label` to look correct.
 
 ---
 
+## Challenge 17 — gesture recognition was not reliable enough to be the only mode-switch and landing trigger
+
+### Symptom
+The gesture pipeline could work, but it was not consistently reliable enough to be the only way to switch modes or land during the full demo.
+
+### Diagnosis
+The issue was not only classifier quality. The practical demo problem was that the user needed a backup signal that came from the same cue family as the balloon detector and did not depend entirely on gesture classification.
+
+### Resolution
+The pink-balloon detector was extended to publish a debounced blob count. The intended meanings became:
+- `0` = no valid pink cue
+- `1` = one intact balloon region
+- `2` = two valid pink regions, produced by intentionally splitting the balloon visually with the hand
+
+The supervisor was then updated so that:
+- in `FOLLOW_BALLOON`, either a confirmed gesture or a confirmed two-blob cue can enter `GESTURE_MODE`
+- in `GESTURE_MODE`, either the `Land` gesture or the two-blob cue can command landing
+
+### Practical lesson
+For the full demo, a backup transition signal from the same robust cue family can be more useful than forcing all control transitions through a weaker recognizer.
+
+---
+
 # 11. Why the Project Was Built in This Order
 
 This order was deliberate.
@@ -1423,10 +1467,11 @@ The project has now effectively split the perception problem into two roles:
 
 ## Closer-range perception
 Handled by:
-- `hand_detector`
+- `gesture_recognizer`
+- the earlier `hand_detector` validation node
 
 Purpose:
-- determine whether a hand is visible once the target is already large enough in the image
+- determine and classify close-range hand commands once the system is already in gesture mode
 
 ## Long-range acquisition
 Handled by:
@@ -1435,10 +1480,20 @@ Handled by:
 Purpose:
 - provide a larger, simpler, more visible cue for long-range visual acquisition
 
+## Backup mode-switch and landing cue
+Also handled by:
+- `pink_balloon_detector`
+
+Purpose:
+- use the number of valid pink regions as a robust auxiliary signal:
+  - intact balloon → one region
+  - split balloon → two regions
+
 This reflects what the experiments showed:
 - the hand is too small and variable to be the only long-range cue
 - the balloon is visually simpler and larger
 - at 20 ft, color-blob evidence is more reliable than perfect geometric shape
+- the split-balloon cue provides a better backup transition/landing trigger than relying on gesture recognition alone
 
 ---
 
@@ -1449,6 +1504,7 @@ The project now has a working integrated demo path, but several things still nee
 - gesture-to-motion reliability and handoff tuning in the full demo
 - launch and rebuild robustness across repeated test cycles
 - continued safety tuning for flight and landing behavior
+- threshold tuning for the blob-count backup path under representative demo conditions
 
 The core integrated architecture now exists; the remaining work is mostly around reliability, tuning, and repeatability.
 
@@ -1462,7 +1518,9 @@ The next clean step is:
 
 Specifically:
 - verify repeatable balloon-to-gesture handoff behavior during full runs
-- verify safe landing behavior from both the `Land` gesture and the TUI land command
+- verify safe landing behavior from both:
+  - the `Land` gesture
+  - the two-blob cue while already in gesture mode
 - tighten launch / rebuild workflow documentation so demo-day operation is repeatable
 - continue tuning cue detector and supervisor thresholds under representative lab conditions
 
@@ -1493,10 +1551,12 @@ It also moved past several failed or suboptimal cue strategies:
 - orange balloon direction
 - circularity-prioritized balloon detection under glare
 - earlier broken gesture-runtime combinations that did not coexist cleanly with MediaPipe
+- a gesture-only mode-switch / landing path with no robust cue-based backup
 
 The current chosen direction is:
 - pink balloon detection for long-range cueing
 - gesture recognition for close-range command control
+- debounced blob-count interpretation of the pink balloon as a backup cue signal
 - `mission_supervisor` for the high-level state machine
 - `tello_runtime` as the single hardware owner during the full demo
 
